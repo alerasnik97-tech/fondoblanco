@@ -369,72 +369,121 @@ elif step == 4:
         headers = {"Authorization": f"Bearer {token}", "User-Agent": "Mozilla/5.0"}
         bar = st.progress(0, text="Iniciando...")
         ok, errores_detalle = 0, []
+
         with zipfile.ZipFile("procesadas.zip") as zf:
             for i, nombre in enumerate(nombres):
+
                 item_id = nombre.split("_resultado")[0].split(".")[0]
                 bar.progress((i+1)/len(nombres), text=f"Subiendo {i+1}/{len(nombres)}: {item_id}")
+
                 try:
+
                     # 1. Obtener fotos actuales del ítem
-                    r = requests.get(f"https://api.mercadolibre.com/items/{item_id}",
-                                     headers=headers, timeout=10)
+                    r = requests.get(
+                        f"https://api.mercadolibre.com/items/{item_id}",
+                        headers=headers,
+                        timeout=10
+                    )
+
                     if r.status_code != 200:
                         errores_detalle.append(f"❌ {item_id}: GET item → {r.status_code} {r.text[:150]}")
                         continue
+
                     pictures = r.json().get("pictures", [])
                     fotos_restantes = [{"id": p["id"]} for p in pictures[1:]]
 
-                    # 2. Subir nueva imagen (con reescalado)
+                    # 2. Preparar imagen optimizada para ML
                     img_data = zf.read(nombre)
-                    
-                    # --- NUEVO: Reescalar imagen para superar el autocrop de ML ---
-                    img = Image.open(io.BytesIO(img_data))
-                    ancho, alto = img.size
-                    
-                    factor = max(1200 / ancho, 1200 / alto) 
-                    if factor > 1:
-                        nuevo_ancho, nuevo_alto = int(ancho * factor), int(alto * factor)
-                        # LANCZOS mantiene buena calidad al agrandar
-                        img = img.resize((nuevo_ancho, nuevo_alto), Image.Resampling.LANCZOS)
-                        
-                    buf = io.BytesIO()
-                    img.convert('RGB').save(buf, format='JPEG', quality=95)
-                    img_data_final = buf.getvalue()
-                    # -------------------------------------------------------------
 
+                    img = Image.open(io.BytesIO(img_data)).convert("RGB")
+                    ancho, alto = img.size
+
+                    canvas_size = 1200
+
+                    # Si la imagen es más grande la reducimos (nunca la agrandamos)
+                    if max(ancho, alto) > canvas_size:
+                        scale = canvas_size / max(ancho, alto)
+                        nuevo_ancho = int(ancho * scale)
+                        nuevo_alto = int(alto * scale)
+                        img = img.resize((nuevo_ancho, nuevo_alto), Image.Resampling.LANCZOS)
+                        ancho, alto = img.size
+
+                    # Crear fondo blanco
+                    canvas = Image.new("RGB", (canvas_size, canvas_size), (255, 255, 255))
+
+                    # Centrar imagen
+                    x = (canvas_size - ancho) // 2
+                    y = (canvas_size - alto) // 2
+                    canvas.paste(img, (x, y))
+
+                    # Guardar con máxima calidad
+                    buf = io.BytesIO()
+                    canvas.save(
+                        buf,
+                        format="JPEG",
+                        quality=97,
+                        subsampling=0,
+                        optimize=True
+                    )
+
+                    img_data_final = buf.getvalue()
+
+                    # 3. Subir imagen a ML
                     upload = requests.post(
                         "https://api.mercadolibre.com/pictures/items/upload",
                         headers={"Authorization": f"Bearer {token}"},
-                        files={"file": (nombre, img_data_final, "image/jpeg")}, timeout=30)
-                    
+                        files={"file": (nombre, img_data_final, "image/jpeg")},
+                        timeout=30
+                    )
+
                     if upload.status_code not in (200, 201):
                         errores_detalle.append(f"❌ {item_id}: UPLOAD foto → {upload.status_code} {upload.text[:150]}")
                         continue
+
                     nueva_id = upload.json()["id"]
 
-                    # 3. Actualizar el ítem con la nueva foto
+                    # 4. Actualizar publicación
                     update = requests.put(
                         f"https://api.mercadolibre.com/items/{item_id}",
                         headers={**headers, "Content-Type": "application/json"},
-                        json={"pictures": [{"id": nueva_id}] + fotos_restantes}, timeout=15)
+                        json={"pictures": [{"id": nueva_id}] + fotos_restantes},
+                        timeout=15
+                    )
+
                     if update.status_code not in (200, 201):
                         errores_detalle.append(f"❌ {item_id}: PUT item → {update.status_code} {update.text[:150]}")
                         continue
+
                     ok += 1
+
                 except Exception as e:
                     errores_detalle.append(f"❌ {item_id}: excepción → {str(e)}")
+
                 time.sleep(0.5)
 
         bar.progress(1.0, text="Completado")
+
         if ok:
             st.success(f"✅ {ok} publicaciones actualizadas en MercadoLibre")
+
         if errores_detalle:
             st.warning(f"⚠️ {len(errores_detalle)} errores")
             with st.expander("Ver detalle de errores"):
                 for e in errores_detalle:
                     st.text(e)
+
         if st.button("Volver al inicio", type="primary"):
-            for f in ['items.json','step.json','listo_paso2.txt','portadas_descargadas.zip','procesadas.zip','img_urls.json']:
-                if os.path.exists(f): os.remove(f)
+            for f in [
+                'items.json',
+                'step.json',
+                'listo_paso2.txt',
+                'portadas_descargadas.zip',
+                'procesadas.zip',
+                'img_urls.json'
+            ]:
+                if os.path.exists(f):
+                    os.remove(f)
+
             st.session_state.clear()
             save_step(1)
             st.rerun()
