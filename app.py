@@ -414,5 +414,8 @@ elif step == 4:
         if ok: st.success(f"✅ {ok} publicaciones actualizadas en MercadoLibre")
         if errores: st.warning(f"⚠️ {errores} errores")
         if st.button("Volver al inicio", type="primary"):
+            for f in ['items.json','step.json','listo_paso2.txt','portadas_descargadas.zip','procesadas.zip','img_urls.json']:
+                if os.path.exists(f): os.remove(f)
+            st.session_state.clear()
             save_step(1)
             st.rerun()
