@@ -363,22 +363,28 @@ elif step == 4:
 
     with zipfile.ZipFile("procesadas.zip") as zf:
         nombres = [n for n in zf.namelist() if n.upper().startswith("MLA")]
+
     st.write(f"**{len(nombres)}** fotos listas para subir a MercadoLibre")
 
     if st.button("Subir todas las fotos a ML", type="primary"):
+
         headers = {"Authorization": f"Bearer {token}", "User-Agent": "Mozilla/5.0"}
         bar = st.progress(0, text="Iniciando...")
-        ok, errores_detalle = 0, []
+
+        ok = 0
+        errores_detalle = []
 
         with zipfile.ZipFile("procesadas.zip") as zf:
+
             for i, nombre in enumerate(nombres):
 
                 item_id = nombre.split("_resultado")[0].split(".")[0]
+
                 bar.progress((i+1)/len(nombres), text=f"Subiendo {i+1}/{len(nombres)}: {item_id}")
 
                 try:
 
-                    # 1. Obtener fotos actuales del ítem
+                    # Obtener fotos actuales
                     r = requests.get(
                         f"https://api.mercadolibre.com/items/{item_id}",
                         headers=headers,
@@ -386,38 +392,43 @@ elif step == 4:
                     )
 
                     if r.status_code != 200:
-                        errores_detalle.append(f"❌ {item_id}: GET item → {r.status_code} {r.text[:150]}")
+                        errores_detalle.append(f"{item_id}: GET item → {r.status_code}")
                         continue
 
                     pictures = r.json().get("pictures", [])
                     fotos_restantes = [{"id": p["id"]} for p in pictures[1:]]
 
-                    # 2. Preparar imagen optimizada para ML
+                    # Leer imagen procesada
                     img_data = zf.read(nombre)
-
                     img = Image.open(io.BytesIO(img_data)).convert("RGB")
+
                     ancho, alto = img.size
 
-                    canvas_size = 1200
+                    # Queremos que la imagen tenga tamaño visual similar a tus otras fotos
+                    target_long_side = 900
 
-                    # Si la imagen es más grande la reducimos (nunca la agrandamos)
-                    if max(ancho, alto) > canvas_size:
-                        scale = canvas_size / max(ancho, alto)
-                        nuevo_ancho = int(ancho * scale)
-                        nuevo_alto = int(alto * scale)
-                        img = img.resize((nuevo_ancho, nuevo_alto), Image.Resampling.LANCZOS)
-                        ancho, alto = img.size
+                    scale = target_long_side / max(ancho, alto)
 
-                    # Crear fondo blanco
-                    canvas = Image.new("RGB", (canvas_size, canvas_size), (255, 255, 255))
+                    nuevo_ancho = int(ancho * scale)
+                    nuevo_alto = int(alto * scale)
 
-                    # Centrar imagen
-                    x = (canvas_size - ancho) // 2
-                    y = (canvas_size - alto) // 2
-                    canvas.paste(img, (x, y))
+                    img = img.resize((nuevo_ancho, nuevo_alto), Image.Resampling.LANCZOS)
 
-                    # Guardar con máxima calidad
+                    ancho, alto = img.size
+
+                    # Lienzo final igual a tus otras fotos
+                    canvas_w = 1200
+                    canvas_h = 900
+
+                    canvas = Image.new("RGB", (canvas_w, canvas_h), (255,255,255))
+
+                    x = (canvas_w - ancho) // 2
+                    y = (canvas_h - alto) // 2
+
+                    canvas.paste(img, (x,y))
+
                     buf = io.BytesIO()
+
                     canvas.save(
                         buf,
                         format="JPEG",
@@ -428,7 +439,7 @@ elif step == 4:
 
                     img_data_final = buf.getvalue()
 
-                    # 3. Subir imagen a ML
+                    # Subir imagen
                     upload = requests.post(
                         "https://api.mercadolibre.com/pictures/items/upload",
                         headers={"Authorization": f"Bearer {token}"},
@@ -436,51 +447,44 @@ elif step == 4:
                         timeout=30
                     )
 
-                    if upload.status_code not in (200, 201):
-                        errores_detalle.append(f"❌ {item_id}: UPLOAD foto → {upload.status_code} {upload.text[:150]}")
+                    if upload.status_code not in (200,201):
+                        errores_detalle.append(f"{item_id}: upload → {upload.status_code}")
                         continue
 
                     nueva_id = upload.json()["id"]
 
-                    # 4. Actualizar publicación
+                    # Actualizar publicación
                     update = requests.put(
                         f"https://api.mercadolibre.com/items/{item_id}",
-                        headers={**headers, "Content-Type": "application/json"},
-                        json={"pictures": [{"id": nueva_id}] + fotos_restantes},
+                        headers={**headers, "Content-Type":"application/json"},
+                        json={"pictures":[{"id":nueva_id}] + fotos_restantes},
                         timeout=15
                     )
 
-                    if update.status_code not in (200, 201):
-                        errores_detalle.append(f"❌ {item_id}: PUT item → {update.status_code} {update.text[:150]}")
+                    if update.status_code not in (200,201):
+                        errores_detalle.append(f"{item_id}: update → {update.status_code}")
                         continue
 
                     ok += 1
 
                 except Exception as e:
-                    errores_detalle.append(f"❌ {item_id}: excepción → {str(e)}")
+                    errores_detalle.append(f"{item_id}: {str(e)}")
 
                 time.sleep(0.5)
 
         bar.progress(1.0, text="Completado")
 
         if ok:
-            st.success(f"✅ {ok} publicaciones actualizadas en MercadoLibre")
+            st.success(f"✅ {ok} publicaciones actualizadas")
 
         if errores_detalle:
             st.warning(f"⚠️ {len(errores_detalle)} errores")
-            with st.expander("Ver detalle de errores"):
+            with st.expander("Ver detalle"):
                 for e in errores_detalle:
                     st.text(e)
 
-        if st.button("Volver al inicio", type="primary"):
-            for f in [
-                'items.json',
-                'step.json',
-                'listo_paso2.txt',
-                'portadas_descargadas.zip',
-                'procesadas.zip',
-                'img_urls.json'
-            ]:
+        if st.button("Volver al inicio"):
+            for f in ['items.json','step.json','listo_paso2.txt','portadas_descargadas.zip','procesadas.zip','img_urls.json']:
                 if os.path.exists(f):
                     os.remove(f)
 
