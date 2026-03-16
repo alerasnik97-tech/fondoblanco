@@ -166,13 +166,15 @@ elif step == 2:
         st.stop()
 
     if st.button("Descargar todas las fotos", type="primary"):
-        headers = {"Authorization": f"Bearer {token}", "User-Agent": "Mozilla/5.0"}
+        api_headers = {"Authorization": f"Bearer {token}", "User-Agent": "Mozilla/5.0"}
+        img_headers = {"User-Agent": "Mozilla/5.0"}
         bar = st.progress(0, text="Iniciando...")
         fotos = {}
+        errores_detalle = []
         for i, item_id in enumerate(items):
             bar.progress((i+1)/len(items), text=f"Descargando {i+1}/{len(items)}: {item_id}")
             try:
-                r = requests.get(f"https://api.mercadolibre.com/items/{item_id}", headers=headers, timeout=10)
+                r = requests.get(f"https://api.mercadolibre.com/items/{item_id}", headers=api_headers, timeout=10)
                 r.raise_for_status()
                 data = r.json()
                 pics = data.get("pictures", [])
@@ -181,15 +183,32 @@ elif step == 2:
                 else:
                     img_url = data.get("thumbnail","").replace("-I.jpg","-O.jpg")
                 if img_url:
-                    img_r = requests.get(img_url, headers=headers, timeout=15)
+                    # Imágenes de ML no requieren auth, y a veces la rechazan
+                    img_r = requests.get(img_url, headers=img_headers, timeout=15)
                     img_r.raise_for_status()
-                    fotos[item_id] = img_r.content
-            except: pass
+                    if len(img_r.content) > 1000:  # sanity check: imagen real
+                        fotos[item_id] = img_r.content
+                    else:
+                        errores_detalle.append(f"{item_id}: respuesta de imagen muy pequeña ({len(img_r.content)} bytes)")
+                else:
+                    errores_detalle.append(f"{item_id}: no se encontró URL de imagen")
+            except Exception as e:
+                errores_detalle.append(f"{item_id}: {str(e)}")
             time.sleep(0.2)
+        
+        if errores_detalle:
+            with st.expander(f"⚠️ {len(errores_detalle)} errores al descargar"):
+                for err in errores_detalle:
+                    st.text(err)
 
         bar.progress(1.0, text=f"Listo — {len(fotos)} fotos descargadas")
+
+        if len(fotos) == 0:
+            st.error("No se pudo descargar ninguna foto. Revisá los errores de arriba y verificá que el token sea válido.")
+            st.stop()
+
         zip_buf = io.BytesIO()
-        with zipfile.ZipFile(zip_buf, "w") as zf:
+        with zipfile.ZipFile(zip_buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
             for iid, content in fotos.items():
                 zf.writestr(f"{iid}.jpg", content)
         zip_buf.seek(0)
@@ -197,6 +216,7 @@ elif step == 2:
 
         with open("portadas_descargadas.zip","wb") as f: f.write(zip_bytes)
 
+        st.success(f"✅ {len(fotos)} fotos guardadas en el ZIP ({len(zip_bytes)//1024} KB total)")
         st.download_button("⬇ Descargar ZIP con todas las fotos", data=zip_bytes,
                            file_name="portadas_ml.zip", mime="application/zip")
         st.info("Procesá el ZIP en Claude para borrar el fondo, luego continuá.")
