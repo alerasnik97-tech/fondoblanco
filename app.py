@@ -82,10 +82,8 @@ def obtener_token_code(code):
 
 def get_token():
     """Devuelve el token activo. Primero intenta session_state, luego disco, luego renovar."""
-    # 1. Ya está en sesión
     if st.session_state.get("token"):
         return st.session_state.token
-    # 2. Leer del disco sin chequeo de expiración — dejar que la API diga si es inválido
     if os.path.exists(TOKEN_FILE):
         with open(TOKEN_FILE) as f:
             saved = json.load(f)
@@ -93,7 +91,6 @@ def get_token():
         if t:
             st.session_state.token = t
             return t
-    # 3. Intentar renovar con refresh_token
     t = renovar_token()
     if t:
         st.session_state.token = t
@@ -110,7 +107,6 @@ st.markdown('<div class="sub-title">Actualizá las fotos de portada de tus publi
 col_r1, col_r2 = st.columns([6,1])
 with col_r2:
     if st.button('↺ Reiniciar'):
-        # CORRECCIÓN: Se agregó 'img_urls.json' a la lista para que limpie bien la memoria
         for f in ['items.json','step.json','listo_paso2.txt','portadas_descargadas.zip','procesadas.zip', 'img_urls.json']:
             if os.path.exists(f): os.remove(f)
         st.rerun()
@@ -135,12 +131,10 @@ if not token:
             st.error("Código inválido o vencido.")
     st.stop()
 else:
-    # Mostrar botón de reconexión siempre visible en el sidebar
     with st.sidebar:
         st.caption("🔒 Sesión activa")
         auth_url = f"https://auth.mercadolibre.com.ar/authorization?response_type=code&client_id={CLIENT_ID}&redirect_uri={REDIRECT_URI}&scope={ML_SCOPES.replace(' ', '%20')}"
         if st.button("Reconectar con ML"):
-            # Limpiar token viejo
             st.session_state.pop("token", None)
             if os.path.exists(TOKEN_FILE): os.remove(TOKEN_FILE)
             st.rerun()
@@ -183,7 +177,6 @@ elif step == 2:
             st.rerun()
         st.stop()
 
-    # Verificar si el token actual funciona
     test_token = get_token()
     if not test_token:
         st.error("❌ Tu sesión de MercadoLibre venció. Reconectate sin perder las publicaciones importadas:")
@@ -215,7 +208,6 @@ elif step == 2:
     IMG_URLS_FILE = "img_urls.json"
     current_token = get_token() or ""
 
-    # ── Servidor obtiene las URLs usando access_token como query param ──
     if not os.path.exists(IMG_URLS_FILE):
         if st.button("Obtener fotos de portada", type="primary"):
             bar = st.progress(0, text="Obteniendo datos...")
@@ -224,13 +216,11 @@ elif step == 2:
             for i, item_id in enumerate(items):
                 bar.progress((i+1)/len(items), text=f"{i+1}/{len(items)}: {item_id}")
                 try:
-                    # Bearer header — igual que en Paso 4 donde sí funciona
                     r = requests.get(
                         f"https://api.mercadolibre.com/items/{item_id}",
                         headers={"Authorization": f"Bearer {current_token}", "User-Agent": "Mozilla/5.0"},
                         timeout=12)
                     if r.status_code == 403:
-                        # Intentar renovar token y reintentar una vez
                         new_t = renovar_token()
                         if new_t:
                             current_token = new_t
@@ -268,11 +258,8 @@ elif step == 2:
 2. Abrí tu app → sección **Scopes/Permisos**
 3. Habilitá **read_listings** y **write_listings** → Guardá
 4. Volvé acá y hacé click en **Reconectar con ML** (botón del sidebar izquierdo)""")
-                auth_url = f"https://auth.mercadolibre.com.ar/authorization?response_type=code&client_id={CLIENT_ID}&redirect_uri={REDIRECT_URI}&scope={ML_SCOPES.replace(' ', '%20')}"
-                st.markdown(f"O reconectate directamente: [**Autorizar con nuevos permisos →**]({auth_url})")
         st.stop()
 
-    # ── JS descarga las imágenes desde el CDN de ML ──
     with open(IMG_URLS_FILE) as f:
         img_urls = json.load(f)
     st.success(f"✅ {len(img_urls)} URLs listas. Descargá el ZIP:")
@@ -396,14 +383,29 @@ elif step == 4:
                     pictures = r.json().get("pictures", [])
                     fotos_restantes = [{"id": p["id"]} for p in pictures[1:]]
 
-                    # 2. Subir nueva imagen
+                    # 2. Subir nueva imagen (con reescalado)
                     img_data = zf.read(nombre)
+                    
+                    # --- NUEVO: Reescalar imagen para superar el autocrop de ML ---
+                    img = Image.open(io.BytesIO(img_data))
+                    ancho, alto = img.size
+                    
+                    factor = max(1200 / ancho, 1200 / alto) 
+                    if factor > 1:
+                        nuevo_ancho, nuevo_alto = int(ancho * factor), int(alto * factor)
+                        # LANCZOS mantiene buena calidad al agrandar
+                        img = img.resize((nuevo_ancho, nuevo_alto), Image.Resampling.LANCZOS)
+                        
+                    buf = io.BytesIO()
+                    img.convert('RGB').save(buf, format='JPEG', quality=95)
+                    img_data_final = buf.getvalue()
+                    # -------------------------------------------------------------
+
                     upload = requests.post(
                         "https://api.mercadolibre.com/pictures/items/upload",
                         headers={"Authorization": f"Bearer {token}"},
-                        files={"file": (nombre, img_data, "image/jpeg")}, timeout=30)
+                        files={"file": (nombre, img_data_final, "image/jpeg")}, timeout=30)
                     
-                    # CORRECCIÓN: Ahora acepta 200 y 201 como éxito válido.
                     if upload.status_code not in (200, 201):
                         errores_detalle.append(f"❌ {item_id}: UPLOAD foto → {upload.status_code} {upload.text[:150]}")
                         continue
