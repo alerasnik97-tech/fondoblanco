@@ -204,88 +204,107 @@ elif step == 2:
         st.stop()
 
     st.write(f"**{len(items)}** publicaciones listas para descargar")
-    if os.path.exists("listo_paso2.txt") and os.path.exists("portadas_descargadas.zip"):
-        with open("portadas_descargadas.zip", "rb") as f:
-            zip_bytes = f.read()
-        st.success("Fotos descargadas correctamente.")
-        st.download_button("⬇ Descargar ZIP con todas las fotos", data=zip_bytes,
-                           file_name="portadas_ml.zip", mime="application/zip",
-                           key="dl_zip")
-        st.info("Procesá el ZIP en Claude para borrar el fondo, luego continuá.")
+    if os.path.exists("listo_paso2.txt"):
+        st.success("Fotos descargadas. Subí el ZIP al paso siguiente cuando estés listo.")
         if st.button("Continuar al Paso 3 →", type="primary"):
-            os.remove("listo_paso2.txt")
+            if os.path.exists("listo_paso2.txt"): os.remove("listo_paso2.txt")
             save_step(3)
             st.rerun()
         st.stop()
 
-    if st.button("Descargar todas las fotos", type="primary"):
-        # Verificar/renovar token antes de empezar
-        current_token = get_token()
-        if not current_token:
-            st.error("❌ Token vencido. Reconectate usando el link de arriba.")
-            st.stop()
-        api_headers = {"Authorization": f"Bearer {current_token}", "User-Agent": "Mozilla/5.0"}
-        img_headers = {"User-Agent": "Mozilla/5.0"}
+    st.info("💡 Las fotos se descargan directamente desde tu navegador para evitar bloqueos de ML.")
 
-        # Mostrar quién está logueado
-        me = requests.get("https://api.mercadolibre.com/users/me", headers=api_headers, timeout=8).json()
-        st.info(f"🔑 Conectado como: **{me.get('nickname','?')}** (ID: {me.get('id','?')})")
-        bar = st.progress(0, text="Iniciando...")
-        fotos = {}
-        errores_detalle = []
-        for i, item_id in enumerate(items):
-            bar.progress((i+1)/len(items), text=f"Descargando {i+1}/{len(items)}: {item_id}")
-            try:
-                # /items/{id} es endpoint público — NO usar Bearer token
-                # (ML rechaza con 403 si la app no tiene el scope correcto)
-                r = requests.get(
-                    f"https://api.mercadolibre.com/items/{item_id}",
-                    headers=img_headers, timeout=10)
-                r.raise_for_status()
-                data = r.json()
-                pics = data.get("pictures", [])
-                if pics:
-                    img_url = pics[0].get("secure_url") or pics[0].get("url","")
-                else:
-                    img_url = data.get("thumbnail","").replace("-I.jpg","-O.jpg")
-                if img_url:
-                    img_r = requests.get(img_url, headers=img_headers, timeout=15)
-                    img_r.raise_for_status()
-                    if len(img_r.content) > 1000:
-                        fotos[item_id] = img_r.content
-                    else:
-                        errores_detalle.append(f"{item_id}: imagen inválida ({len(img_r.content)} bytes)")
-                else:
-                    errores_detalle.append(f"{item_id}: no se encontró URL de imagen")
-            except Exception as e:
-                errores_detalle.append(f"{item_id}: {str(e)}")
-            time.sleep(0.2)
+    # Componente JS que descarga las imágenes desde el browser del usuario
+    current_token = get_token()
+    items_json = json.dumps(items)
 
-        if errores_detalle:
-            with st.expander(f"⚠️ {len(errores_detalle)} errores al descargar"):
-                for err in errores_detalle:
-                    st.text(err)
+    js_component = f"""
+    <div id="downloader" style="font-family:sans-serif;color:#eee">
+      <button id="btn" onclick="startDownload()" style="
+        background:#e53935;color:white;border:none;padding:12px 24px;
+        font-size:15px;border-radius:8px;cursor:pointer;font-weight:600">
+        ⬇ Descargar fotos de portada
+      </button>
+      <div id="log" style="margin-top:14px;font-size:13px;color:#aaa"></div>
+      <div id="bar-wrap" style="display:none;margin-top:10px;background:#333;border-radius:6px;height:10px;width:100%">
+        <div id="bar" style="background:#3483FA;height:10px;border-radius:6px;width:0%;transition:width 0.3s"></div>
+      </div>
+    </div>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+    <script>
+    const ITEMS = {items_json};
+    const TOKEN = "{current_token}";
 
-        bar.progress(1.0, text=f"Listo — {len(fotos)} fotos descargadas")
+    function log(msg) {{
+      document.getElementById('log').innerText = msg;
+    }}
+    function setBar(pct) {{
+      document.getElementById('bar-wrap').style.display = 'block';
+      document.getElementById('bar').style.width = pct + '%';
+    }}
 
-        if len(fotos) == 0:
-            st.error("No se pudo descargar ninguna foto. El token puede estar vencido — usá el botón 'Reconectar' arriba.")
-            st.stop()
+    async function startDownload() {{
+      document.getElementById('btn').disabled = true;
+      document.getElementById('btn').innerText = 'Descargando...';
+      const zip = new JSZip();
+      let ok = 0, errors = [];
 
-        zip_buf = io.BytesIO()
-        with zipfile.ZipFile(zip_buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-            for iid, img_content in fotos.items():
-                zf.writestr(f"{iid}.jpg", img_content)
-        zip_buf.seek(0)
-        zip_bytes = zip_buf.getvalue()
+      for (let i = 0; i < ITEMS.length; i++) {{
+        const itemId = ITEMS[i];
+        log(`Procesando ${{i+1}}/${{ITEMS.length}}: ${{itemId}}`);
+        setBar(Math.round((i+1)/ITEMS.length*90));
+        try {{
+          // Fetch item data con token como query param (evita CORS preflight)
+          const resp = await fetch(
+            `https://api.mercadolibre.com/items/${{itemId}}?access_token=${{TOKEN}}`
+          );
+          if (!resp.ok) {{ errors.push(`${{itemId}}: HTTP ${{resp.status}}`); continue; }}
+          const data = await resp.json();
 
-        with open("portadas_descargadas.zip","wb") as f: f.write(zip_bytes)
+          let imgUrl = '';
+          if (data.pictures && data.pictures.length > 0) {{
+            imgUrl = data.pictures[0].secure_url || data.pictures[0].url || '';
+          }} else {{
+            imgUrl = (data.thumbnail || '').replace('-I.jpg', '-O.jpg');
+          }}
+          if (!imgUrl) {{ errors.push(`${{itemId}}: sin URL de imagen`); continue; }}
 
-        st.success(f"✅ {len(fotos)} fotos guardadas ({len(zip_bytes)//1024} KB)")
-        st.download_button("⬇ Descargar ZIP con todas las fotos", data=zip_bytes,
-                           file_name="portadas_ml.zip", mime="application/zip")
-        st.info("Procesá el ZIP en Claude para borrar el fondo, luego continuá.")
+          const imgResp = await fetch(imgUrl);
+          if (!imgResp.ok) {{ errors.push(`${{itemId}}: error imagen ${{imgResp.status}}`); continue; }}
+          const blob = await imgResp.blob();
+          zip.file(`${{itemId}}.jpg`, blob);
+          ok++;
+        }} catch(e) {{
+          errors.push(`${{itemId}}: ${{e.message}}`);
+        }}
+      }}
+
+      if (ok === 0) {{
+        log('❌ No se pudo descargar ninguna foto. Errores: ' + errors.join(' | '));
+        document.getElementById('btn').disabled = false;
+        document.getElementById('btn').innerText = '↺ Reintentar';
+        return;
+      }}
+
+      log(`Generando ZIP con ${{ok}} fotos...`);
+      setBar(95);
+      const content = await zip.generateAsync({{type:'blob'}});
+      const url = URL.createObjectURL(content);
+      const a = document.createElement('a');
+      a.href = url; a.download = 'portadas_ml.zip'; a.click();
+      setBar(100);
+      log(`✅ ZIP descargado con ${{ok}} fotos.${{errors.length ? ' Errores: ' + errors.join(', ') : ''}}`);
+      document.getElementById('btn').innerText = '✅ Descargado';
+    }}
+    </script>
+    """
+    st.components.v1.html(js_component, height=160)
+
+    st.divider()
+    st.info("Una vez que descargaste el ZIP desde el botón de arriba, hacé click acá:")
+    if st.button("Ya descargué el ZIP → Continuar al Paso 3", type="primary"):
         with open("listo_paso2.txt","w") as f: f.write("ok")
+        save_step(3)
         st.rerun()
 
 # ══ PASO 3 ══
