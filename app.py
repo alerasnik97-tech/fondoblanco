@@ -384,7 +384,7 @@ elif step == 4:
 
                 try:
 
-                    # Obtener fotos actuales
+                    # Obtener fotos actuales del ítem
                     r = requests.get(
                         f"https://api.mercadolibre.com/items/{item_id}",
                         headers=headers,
@@ -403,30 +403,37 @@ elif step == 4:
                     img = Image.open(io.BytesIO(img_data)).convert("RGB")
 
                     ancho, alto = img.size
+                    target = 1200
 
-                    # lado máximo permitido
-                    max_side = 1200
-
-                    scale = max_side / max(ancho, alto)
+                    # Escalar manteniendo proporción
+                    scale = min(target / ancho, target / alto)
 
                     nuevo_ancho = int(ancho * scale)
                     nuevo_alto = int(alto * scale)
 
                     img = img.resize((nuevo_ancho, nuevo_alto), Image.Resampling.LANCZOS)
 
+                    # Crear fondo blanco
+                    canvas = Image.new("RGB", (target, target), (255,255,255))
+
+                    x = (target - nuevo_ancho) // 2
+                    y = (target - nuevo_alto) // 2
+
+                    canvas.paste(img, (x,y))
+
                     buf = io.BytesIO()
 
-                    img.save(
+                    canvas.save(
                         buf,
                         format="JPEG",
-                        quality=97,
+                        quality=98,
                         subsampling=0,
                         optimize=True
                     )
 
                     img_data_final = buf.getvalue()
 
-                    # Subir imagen
+                    # Subir imagen a MercadoLibre
                     upload = requests.post(
                         "https://api.mercadolibre.com/pictures/items/upload",
                         headers={"Authorization": f"Bearer {token}"},
