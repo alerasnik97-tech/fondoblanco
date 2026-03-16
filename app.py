@@ -261,7 +261,14 @@ elif step == 2:
                 st.success(f"✅ {len(img_urls)} URLs obtenidas. Ahora descargá el ZIP.")
                 st.rerun()
             else:
-                st.error("No se pudo obtener ninguna URL. Reconectate con el botón del sidebar.")
+                st.error("❌ Error de permisos (access_denied). Tu app de MercadoLibre no tiene el scope `read_listings` habilitado.")
+                st.warning("""**Para solucionarlo:**
+1. Entrá a https://developers.mercadolibre.com.ar/devcenter
+2. Abrí tu app → sección **Scopes/Permisos**
+3. Habilitá **read_listings** y **write_listings** → Guardá
+4. Volvé acá y hacé click en **Reconectar con ML** (botón del sidebar izquierdo)""")
+                auth_url = f"https://auth.mercadolibre.com.ar/authorization?response_type=code&client_id={CLIENT_ID}&redirect_uri={REDIRECT_URI}&scope={ML_SCOPES.replace(' ', '%20')}"
+                st.markdown(f"O reconectate directamente: [**Autorizar con nuevos permisos →**]({auth_url})")
         st.stop()
 
     # ── JS descarga las imágenes desde el CDN de ML ──
