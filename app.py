@@ -384,35 +384,53 @@ elif step == 4:
     if st.button("Subir todas las fotos a ML", type="primary"):
         headers = {"Authorization": f"Bearer {token}", "User-Agent": "Mozilla/5.0"}
         bar = st.progress(0, text="Iniciando...")
-        ok, errores = 0, 0
+        ok, errores_detalle = 0, []
         with zipfile.ZipFile("procesadas.zip") as zf:
             for i, nombre in enumerate(nombres):
                 item_id = nombre.split("_resultado")[0].split(".")[0]
                 bar.progress((i+1)/len(nombres), text=f"Subiendo {i+1}/{len(nombres)}: {item_id}")
                 try:
-                    r = requests.get(f"https://api.mercadolibre.com/items/{item_id}", headers=headers, timeout=10)
-                    r.raise_for_status()
+                    # 1. Obtener fotos actuales del ítem
+                    r = requests.get(f"https://api.mercadolibre.com/items/{item_id}",
+                                     headers=headers, timeout=10)
+                    if r.status_code != 200:
+                        errores_detalle.append(f"❌ {item_id}: GET item → {r.status_code} {r.text[:150]}")
+                        continue
                     pictures = r.json().get("pictures", [])
                     fotos_restantes = [{"id": p["id"]} for p in pictures[1:]]
+
+                    # 2. Subir nueva imagen
                     img_data = zf.read(nombre)
                     upload = requests.post(
                         "https://api.mercadolibre.com/pictures/items/upload",
                         headers={"Authorization": f"Bearer {token}"},
                         files={"file": (nombre, img_data, "image/jpeg")}, timeout=30)
-                    upload.raise_for_status()
+                    if upload.status_code != 200:
+                        errores_detalle.append(f"❌ {item_id}: UPLOAD foto → {upload.status_code} {upload.text[:150]}")
+                        continue
                     nueva_id = upload.json()["id"]
+
+                    # 3. Actualizar el ítem con la nueva foto
                     update = requests.put(
                         f"https://api.mercadolibre.com/items/{item_id}",
                         headers={**headers, "Content-Type": "application/json"},
                         json={"pictures": [{"id": nueva_id}] + fotos_restantes}, timeout=15)
-                    update.raise_for_status()
+                    if update.status_code not in (200, 201):
+                        errores_detalle.append(f"❌ {item_id}: PUT item → {update.status_code} {update.text[:150]}")
+                        continue
                     ok += 1
-                except: errores += 1
+                except Exception as e:
+                    errores_detalle.append(f"❌ {item_id}: excepción → {str(e)}")
                 time.sleep(0.5)
 
         bar.progress(1.0, text="Completado")
-        if ok: st.success(f"✅ {ok} publicaciones actualizadas en MercadoLibre")
-        if errores: st.warning(f"⚠️ {errores} errores")
+        if ok:
+            st.success(f"✅ {ok} publicaciones actualizadas en MercadoLibre")
+        if errores_detalle:
+            st.warning(f"⚠️ {len(errores_detalle)} errores")
+            with st.expander("Ver detalle de errores"):
+                for e in errores_detalle:
+                    st.text(e)
         if st.button("Volver al inicio", type="primary"):
             for f in ['items.json','step.json','listo_paso2.txt','portadas_descargadas.zip','procesadas.zip','img_urls.json']:
                 if os.path.exists(f): os.remove(f)
