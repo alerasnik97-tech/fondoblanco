@@ -8,8 +8,14 @@ import io
 import time
 from PIL import Image
 
-CLIENT_ID     = "4692870472324774"
-CLIENT_SECRET = "TU_CLIENT_SECRET"
+# ── CONFIGURACIÓN DE SECRETOS ──
+try:
+    CLIENT_ID     = st.secrets["CLIENT_ID"]
+    CLIENT_SECRET = st.secrets["CLIENT_SECRET"]
+except KeyError:
+    st.error("Faltan las credenciales en los Secretos (CLIENT_ID o CLIENT_SECRET)")
+    st.stop()
+
 REDIRECT_URI  = "https://httpbin.org/get"
 TOKEN_FILE    = "ml_token.json"
 ITEMS_FILE    = "items.json"
