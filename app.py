@@ -81,19 +81,22 @@ def obtener_token_code(code):
     return None
 
 def get_token():
-    # Si está por vencer, intentar renovar antes de usarlo
-    if token_esta_vencido():
-        t = renovar_token()
+    """Devuelve el token activo. Primero intenta session_state, luego disco, luego renovar."""
+    # 1. Ya está en sesión
+    if st.session_state.get("token"):
+        return st.session_state.token
+    # 2. Leer del disco sin chequeo de expiración — dejar que la API diga si es inválido
+    if os.path.exists(TOKEN_FILE):
+        with open(TOKEN_FILE) as f:
+            saved = json.load(f)
+        t = saved.get("access_token")
         if t:
             st.session_state.token = t
             return t
-        else:
-            st.session_state.pop("token", None)
-            return None
-    if "token" in st.session_state and st.session_state.token:
-        return st.session_state.token
+    # 3. Intentar renovar con refresh_token
     t = renovar_token()
-    if t: st.session_state.token = t
+    if t:
+        st.session_state.token = t
     return t
 
 # ── estado desde disco ──
@@ -181,15 +184,9 @@ elif step == 2:
 
     # Verificar si el token actual funciona
     test_token = get_token()
-    token_ok = False
-    if test_token:
-        test_r = requests.get("https://api.mercadolibre.com/users/me",
-                              headers={"Authorization": f"Bearer {test_token}"}, timeout=8)
-        token_ok = test_r.status_code == 200
-
-    if not token_ok:
+    if not test_token:
         st.error("❌ Tu sesión de MercadoLibre venció. Reconectate sin perder las publicaciones importadas:")
-        auth_url = f"https://auth.mercadolibre.com.ar/authorization?response_type=code&client_id={CLIENT_ID}&redirect_uri={REDIRECT_URI}&scope={ML_SCOPES.replace(" ", "%20")}"
+        auth_url = f"https://auth.mercadolibre.com.ar/authorization?response_type=code&client_id={CLIENT_ID}&redirect_uri={REDIRECT_URI}&scope={ML_SCOPES.replace(' ', '%20')}"
         st.markdown(f"**1.** [Hacé click acá para re-autorizar]({auth_url})")
         st.markdown("**2.** Pegá el nuevo código `TG-`:")
         new_code = st.text_input("Nuevo código TG-", placeholder="TG-XXXXXXXXX", key="reconectar_code")
@@ -197,119 +194,160 @@ elif step == 2:
             t = obtener_token_code(new_code.strip().strip('"'))
             if t:
                 st.session_state.token = t
-                st.success("✅ Reconectado! Ya podés descargar las fotos.")
+                st.success("✅ Reconectado!")
                 st.rerun()
             else:
-                st.error("Código inválido o vencido. Generá uno nuevo desde el link de arriba.")
+                st.error("Código inválido o vencido.")
         st.stop()
 
     st.write(f"**{len(items)}** publicaciones listas para descargar")
-    if os.path.exists("listo_paso2.txt"):
-        st.success("Fotos descargadas. Subí el ZIP al paso siguiente cuando estés listo.")
-        if st.button("Continuar al Paso 3 →", type="primary"):
-            if os.path.exists("listo_paso2.txt"): os.remove("listo_paso2.txt")
-            save_step(3)
-            st.rerun()
+
+    # ── PASO 2a: obtener URLs de imágenes (server-side, con token) ──
+    IMG_URLS_FILE = "img_urls.json"
+
+    if not os.path.exists(IMG_URLS_FILE):
+        st.info("Primero obtenemos las URLs de las imágenes desde MercadoLibre.")
+        if st.button("Obtener URLs de imágenes", type="primary"):
+            current_token = get_token()
+            api_headers = {"Authorization": f"Bearer {current_token}", "User-Agent": "Mozilla/5.0"}
+            bar = st.progress(0, text="Obteniendo URLs...")
+            img_urls = {}
+            errores = []
+            for i, item_id in enumerate(items):
+                bar.progress((i+1)/len(items), text=f"{i+1}/{len(items)}: {item_id}")
+                # Intentar con token (para ítems propios del usuario)
+                for attempt_headers in [api_headers, {"User-Agent": "Mozilla/5.0"}]:
+                    try:
+                        r = requests.get(
+                            f"https://api.mercadolibre.com/items/{item_id}",
+                            headers=attempt_headers, timeout=10)
+                        if r.status_code == 200:
+                            data = r.json()
+                            pics = data.get("pictures", [])
+                            url = (pics[0].get("secure_url") or pics[0].get("url","")) if pics else \
+                                  data.get("thumbnail","").replace("-I.jpg","-O.jpg")
+                            if url:
+                                img_urls[item_id] = url
+                            break
+                        elif r.status_code == 403:
+                            continue  # intentar sin token
+                    except: pass
+                if item_id not in img_urls:
+                    errores.append(item_id)
+                time.sleep(0.15)
+            bar.progress(1.0, text="Listo")
+            if errores:
+                st.warning(f"No se pudieron obtener URLs para: {', '.join(errores)}")
+            if img_urls:
+                with open(IMG_URLS_FILE, "w") as f: json.dump(img_urls, f)
+                st.success(f"✅ {len(img_urls)} URLs obtenidas. Ahora descargá las imágenes.")
+                st.rerun()
+            else:
+                st.error("No se pudo obtener ninguna URL. El token puede estar vencido.")
         st.stop()
 
-    st.info("💡 Las fotos se descargan directamente desde tu navegador para evitar bloqueos de ML.")
+    # ── PASO 2b: descargar imágenes desde el browser ──
+    with open(IMG_URLS_FILE) as f:
+        img_urls = json.load(f)
 
-    # Componente JS que descarga las imágenes desde el browser del usuario
-    current_token = get_token()
-    items_json = json.dumps(items)
+    st.success(f"✅ {len(img_urls)} URLs obtenidas. Descargá el ZIP desde tu navegador:")
 
+    urls_json = json.dumps(img_urls)
     js_component = f"""
-    <div id="downloader" style="font-family:sans-serif;color:#eee">
-      <button id="btn" onclick="startDownload()" style="
-        background:#e53935;color:white;border:none;padding:12px 24px;
-        font-size:15px;border-radius:8px;cursor:pointer;font-weight:600">
-        ⬇ Descargar fotos de portada
-      </button>
-      <div id="log" style="margin-top:14px;font-size:13px;color:#aaa"></div>
-      <div id="bar-wrap" style="display:none;margin-top:10px;background:#333;border-radius:6px;height:10px;width:100%">
-        <div id="bar" style="background:#3483FA;height:10px;border-radius:6px;width:0%;transition:width 0.3s"></div>
-      </div>
-    </div>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
-    <script>
-    const ITEMS = {items_json};
-    const TOKEN = "{current_token}";
+<!DOCTYPE html>
+<html>
+<body style="margin:0;padding:0;background:transparent;font-family:sans-serif">
+<div style="padding:4px 0">
+  <button id="btn" onclick="startDownload()" style="
+    background:#e53935;color:white;border:none;padding:12px 28px;
+    font-size:15px;border-radius:8px;cursor:pointer;font-weight:700;letter-spacing:.3px">
+    ⬇ Descargar ZIP de fotos
+  </button>
+  <div id="log" style="margin-top:10px;font-size:13px;color:#ccc;min-height:20px"></div>
+  <div id="bar-wrap" style="display:none;margin-top:8px;background:#444;border-radius:6px;height:8px;width:95%">
+    <div id="bar" style="background:#3483FA;height:8px;border-radius:6px;width:0%"></div>
+  </div>
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"
+  integrity="sha512-XMVd28F1oH/O71fzwBnV7HucLxVwtxf26XV8P4wPk26EDxuGZ91N8bsOttmnomcCD3CS5ZMRL50H0GgOHvegtg=="
+  crossorigin="anonymous"></script>
+<script>
+const IMG_URLS = {urls_json};
 
-    function log(msg) {{
-      document.getElementById('log').innerText = msg;
+function setLog(msg) {{ document.getElementById('log').innerText = msg; }}
+function setBar(pct) {{
+  document.getElementById('bar-wrap').style.display = 'block';
+  document.getElementById('bar').style.width = pct + '%';
+}}
+
+async function startDownload() {{
+  const btn = document.getElementById('btn');
+  btn.disabled = true;
+  btn.innerText = '⏳ Descargando...';
+  const zip = new JSZip();
+  const entries = Object.entries(IMG_URLS);
+  let ok = 0, errs = [];
+
+  for (let i = 0; i < entries.length; i++) {{
+    const [itemId, url] = entries[i];
+    setLog(`Descargando ${{i+1}}/${{entries.length}}: ${{itemId}}`);
+    setBar(Math.round((i+1)/entries.length * 88));
+    try {{
+      const resp = await fetch(url, {{mode:'cors'}});
+      if (!resp.ok) {{ errs.push(`${{itemId}}: ${{resp.status}}`); continue; }}
+      const blob = await resp.blob();
+      if (blob.size < 1000) {{ errs.push(`${{itemId}}: imagen inválida`); continue; }}
+      zip.file(`${{itemId}}.jpg`, blob);
+      ok++;
+    }} catch(e) {{
+      errs.push(`${{itemId}}: ${{e.message}}`);
     }}
-    function setBar(pct) {{
-      document.getElementById('bar-wrap').style.display = 'block';
-      document.getElementById('bar').style.width = pct + '%';
-    }}
+  }}
 
-    async function startDownload() {{
-      document.getElementById('btn').disabled = true;
-      document.getElementById('btn').innerText = 'Descargando...';
-      const zip = new JSZip();
-      let ok = 0, errors = [];
+  if (ok === 0) {{
+    setLog('❌ Error: ' + errs.join(' | '));
+    btn.disabled = false; btn.innerText = '↺ Reintentar';
+    return;
+  }}
 
-      for (let i = 0; i < ITEMS.length; i++) {{
-        const itemId = ITEMS[i];
-        log(`Procesando ${{i+1}}/${{ITEMS.length}}: ${{itemId}}`);
-        setBar(Math.round((i+1)/ITEMS.length*90));
-        try {{
-          // Fetch item data con token como query param (evita CORS preflight)
-          const resp = await fetch(
-            `https://api.mercadolibre.com/items/${{itemId}}?access_token=${{TOKEN}}`
-          );
-          if (!resp.ok) {{ errors.push(`${{itemId}}: HTTP ${{resp.status}}`); continue; }}
-          const data = await resp.json();
+  setLog(`Generando ZIP (${{ok}} fotos)...`); setBar(95);
+  const blob = await zip.generateAsync({{type:'blob', compression:'DEFLATE'}});
+  setBar(100);
 
-          let imgUrl = '';
-          if (data.pictures && data.pictures.length > 0) {{
-            imgUrl = data.pictures[0].secure_url || data.pictures[0].url || '';
-          }} else {{
-            imgUrl = (data.thumbnail || '').replace('-I.jpg', '-O.jpg');
-          }}
-          if (!imgUrl) {{ errors.push(`${{itemId}}: sin URL de imagen`); continue; }}
-
-          const imgResp = await fetch(imgUrl);
-          if (!imgResp.ok) {{ errors.push(`${{itemId}}: error imagen ${{imgResp.status}}`); continue; }}
-          const blob = await imgResp.blob();
-          zip.file(`${{itemId}}.jpg`, blob);
-          ok++;
-        }} catch(e) {{
-          errors.push(`${{itemId}}: ${{e.message}}`);
-        }}
-      }}
-
-      if (ok === 0) {{
-        log('❌ No se pudo descargar ninguna foto. Errores: ' + errors.join(' | '));
-        document.getElementById('btn').disabled = false;
-        document.getElementById('btn').innerText = '↺ Reintentar';
-        return;
-      }}
-
-      log(`Generando ZIP con ${{ok}} fotos...`);
-      setBar(95);
-      const content = await zip.generateAsync({{type:'blob'}});
-      const url = URL.createObjectURL(content);
-      const a = document.createElement('a');
-      a.href = url; a.download = 'portadas_ml.zip'; a.click();
-      setBar(100);
-      log(`✅ ZIP descargado con ${{ok}} fotos.${{errors.length ? ' Errores: ' + errors.join(', ') : ''}}`);
-      document.getElementById('btn').innerText = '✅ Descargado';
-    }}
-    </script>
+  // Descarga — funciona desde iframe usando window.parent
+  const blobUrl = URL.createObjectURL(blob);
+  window.open(blobUrl, '_blank');
+  setLog('✅ ZIP listo con ' + ok + ' fotos. Si no abrió automáticamente, hacé click acá: <a href="' + blobUrl + '" download="portadas_ml.zip" style="color:#3483FA">Descargar ZIP</a>');
+  btn.innerText = '✅ ZIP generado';
+  document.getElementById('log').innerHTML = '✅ ZIP listo con ' + ok + ' fotos. Hacé click: <a href="' + blobUrl + '" download="portadas_ml.zip" style="color:#3483FA;font-weight:700">📥 Descargar portadas_ml.zip</a>';
+}}
+</script>
+</body>
+</html>
     """
-    st.components.v1.html(js_component, height=160)
+    st.components.v1.html(js_component, height=130, scrolling=False)
 
     st.divider()
-    st.info("Una vez que descargaste el ZIP desde el botón de arriba, hacé click acá:")
-    if st.button("Ya descargué el ZIP → Continuar al Paso 3", type="primary"):
-        with open("listo_paso2.txt","w") as f: f.write("ok")
-        save_step(3)
+    col1, col2 = st.columns([3,1])
+    with col1:
+        st.caption("⬆ Usá el botón rojo para descargar el ZIP. Una vez descargado, continuá →")
+    with col2:
+        if st.button("Ya descargué ✓ Continuar al Paso 3", type="primary"):
+            if os.path.exists(IMG_URLS_FILE): os.remove(IMG_URLS_FILE)
+            with open("listo_paso2.txt","w") as f: f.write("ok")
+            save_step(3)
+            st.rerun()
+
+    if st.button("↺ Volver a obtener URLs"):
+        if os.path.exists(IMG_URLS_FILE): os.remove(IMG_URLS_FILE)
         st.rerun()
 
 # ══ PASO 3 ══
 elif step == 3:
     st.subheader("Paso 3 — Subir fotos con fondo blanco")
+    if st.button("← Volver al Paso 2 (descargar fotos de nuevo)"):
+        save_step(2)
+        st.rerun()
     st.info("Subí el ZIP procesado por Claude. Los archivos deben llamarse: MLA1234567890_resultado.jpg")
     zip_file = st.file_uploader("Subí el ZIP procesado", type=["zip"])
     if zip_file:
