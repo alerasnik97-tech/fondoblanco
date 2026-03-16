@@ -1,0 +1,7 @@
+.streamlit/secrets.toml
+ml_token.json
+items.json
+step.json
+listo_paso2.txt
+*.zip
+venv/
