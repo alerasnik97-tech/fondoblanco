@@ -9,7 +9,7 @@ import time
 from PIL import Image
 
 CLIENT_ID     = "4692870472324774"
-CLIENT_SECRET = "jBtsiR9Swm0PDcf2H8507W3xrxElK1hV"
+CLIENT_SECRET = "TU_CLIENT_SECRET"
 REDIRECT_URI  = "https://httpbin.org/get"
 TOKEN_FILE    = "ml_token.json"
 ITEMS_FILE    = "items.json"
@@ -145,8 +145,14 @@ elif step == 2:
         st.stop()
 
     st.write(f"**{len(items)}** publicaciones listas para descargar")
-    if os.path.exists("listo_paso2.txt"):
-        st.success("Fotos descargadas. Podés continuar al Paso 3.")
+    if os.path.exists("listo_paso2.txt") and os.path.exists("portadas_descargadas.zip"):
+        with open("portadas_descargadas.zip", "rb") as f:
+            zip_bytes = f.read()
+        st.success("Fotos descargadas correctamente.")
+        st.download_button("⬇ Descargar ZIP con todas las fotos", data=zip_bytes,
+                           file_name="portadas_ml.zip", mime="application/zip",
+                           key="dl_zip")
+        st.info("Procesá el ZIP en Claude para borrar el fondo, luego continuá.")
         if st.button("Continuar al Paso 3 →", type="primary"):
             os.remove("listo_paso2.txt")
             save_step(3)
