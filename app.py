@@ -354,6 +354,7 @@ elif step == 3:
 # ══ PASO 4 ══
 elif step == 4:
     st.subheader("Paso 4 — Subir a MercadoLibre")
+
     if not os.path.exists("procesadas.zip"):
         st.warning("No hay fotos procesadas. Volvé al Paso 3.")
         if st.button("← Volver al Paso 3"):
@@ -384,7 +385,7 @@ elif step == 4:
 
                 try:
 
-                    # Obtener fotos actuales del ítem
+                    # Obtener fotos actuales
                     r = requests.get(
                         f"https://api.mercadolibre.com/items/{item_id}",
                         headers=headers,
@@ -398,28 +399,33 @@ elif step == 4:
                     pictures = r.json().get("pictures", [])
                     fotos_restantes = [{"id": p["id"]} for p in pictures[1:]]
 
-                    # Leer imagen procesada
+                    # Leer imagen
                     img_data = zf.read(nombre)
                     img = Image.open(io.BytesIO(img_data)).convert("RGB")
 
                     ancho, alto = img.size
-                    target = 1200
 
-                    # Escalar manteniendo proporción
-                    scale = min(target / ancho, target / alto)
+                    canvas_size = 1200
+                    ocupacion = 0.88
+                    target_max = int(canvas_size * ocupacion)
+
+                    # calcular escala
+                    scale = target_max / max(ancho, alto)
 
                     nuevo_ancho = int(ancho * scale)
                     nuevo_alto = int(alto * scale)
 
+                    # redimensionar
                     img = img.resize((nuevo_ancho, nuevo_alto), Image.Resampling.LANCZOS)
 
-                    # Crear fondo blanco
-                    canvas = Image.new("RGB", (target, target), (255,255,255))
+                    # crear fondo blanco
+                    canvas = Image.new("RGB", (canvas_size, canvas_size), (255,255,255))
 
-                    x = (target - nuevo_ancho) // 2
-                    y = (target - nuevo_alto) // 2
+                    # centrar imagen
+                    x = (canvas_size - nuevo_ancho) // 2
+                    y = (canvas_size - nuevo_alto) // 2
 
-                    canvas.paste(img, (x,y))
+                    canvas.paste(img, (x, y))
 
                     buf = io.BytesIO()
 
@@ -433,7 +439,7 @@ elif step == 4:
 
                     img_data_final = buf.getvalue()
 
-                    # Subir imagen a MercadoLibre
+                    # subir imagen
                     upload = requests.post(
                         "https://api.mercadolibre.com/pictures/items/upload",
                         headers={"Authorization": f"Bearer {token}"},
@@ -447,7 +453,7 @@ elif step == 4:
 
                     nueva_id = upload.json()["id"]
 
-                    # Actualizar publicación
+                    # actualizar publicación
                     update = requests.put(
                         f"https://api.mercadolibre.com/items/{item_id}",
                         headers={**headers, "Content-Type":"application/json"},
@@ -478,7 +484,15 @@ elif step == 4:
                     st.text(e)
 
         if st.button("Volver al inicio"):
-            for f in ['items.json','step.json','listo_paso2.txt','portadas_descargadas.zip','procesadas.zip','img_urls.json']:
+
+            for f in [
+                'items.json',
+                'step.json',
+                'listo_paso2.txt',
+                'portadas_descargadas.zip',
+                'procesadas.zip',
+                'img_urls.json'
+            ]:
                 if os.path.exists(f):
                     os.remove(f)
 
