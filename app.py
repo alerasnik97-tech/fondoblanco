@@ -50,7 +50,15 @@ def load_items():
     return []
 
 def guardar_token(d):
+    d["saved_at"] = time.time()
     with open(TOKEN_FILE,"w") as f: json.dump(d,f)
+
+def token_esta_vencido():
+    if not os.path.exists(TOKEN_FILE): return True
+    with open(TOKEN_FILE) as f: saved = json.load(f)
+    saved_at = saved.get("saved_at", 0)
+    expires_in = saved.get("expires_in", 21600)
+    return (time.time() - saved_at) > (expires_in - 3600)
 
 def renovar_token():
     if not os.path.exists(TOKEN_FILE): return None
@@ -72,6 +80,15 @@ def obtener_token_code(code):
     return None
 
 def get_token():
+    # Si está por vencer, intentar renovar antes de usarlo
+    if token_esta_vencido():
+        t = renovar_token()
+        if t:
+            st.session_state.token = t
+            return t
+        else:
+            st.session_state.pop("token", None)
+            return None
     if "token" in st.session_state and st.session_state.token:
         return st.session_state.token
     t = renovar_token()
@@ -98,6 +115,7 @@ token = get_token()
 if not token:
     st.divider()
     st.subheader("Conectar con MercadoLibre")
+    st.warning("⚠️ No hay sesión activa o el token venció. Volvé a autorizar la app.")
     auth_url = f"https://auth.mercadolibre.com.ar/authorization?response_type=code&client_id={CLIENT_ID}&redirect_uri={REDIRECT_URI}"
     st.markdown(f"**Paso 1:** [Hacé click acá para autorizar]({auth_url})")
     st.markdown("**Paso 2:** Pegá el código `TG-` que aparece en la URL:")
@@ -111,6 +129,16 @@ if not token:
         else:
             st.error("Código inválido o vencido.")
     st.stop()
+else:
+    # Mostrar botón de reconexión siempre visible en el sidebar
+    with st.sidebar:
+        st.caption("🔒 Sesión activa")
+        auth_url = f"https://auth.mercadolibre.com.ar/authorization?response_type=code&client_id={CLIENT_ID}&redirect_uri={REDIRECT_URI}"
+        if st.button("Reconectar con ML"):
+            # Limpiar token viejo
+            st.session_state.pop("token", None)
+            if os.path.exists(TOKEN_FILE): os.remove(TOKEN_FILE)
+            st.rerun()
 
 # ── indicador de pasos ──
 st.divider()
@@ -150,6 +178,30 @@ elif step == 2:
             st.rerun()
         st.stop()
 
+    # Verificar si el token actual funciona
+    test_token = get_token()
+    token_ok = False
+    if test_token:
+        test_r = requests.get("https://api.mercadolibre.com/users/me",
+                              headers={"Authorization": f"Bearer {test_token}"}, timeout=8)
+        token_ok = test_r.status_code == 200
+
+    if not token_ok:
+        st.error("❌ Tu sesión de MercadoLibre venció. Reconectate sin perder las publicaciones importadas:")
+        auth_url = f"https://auth.mercadolibre.com.ar/authorization?response_type=code&client_id={CLIENT_ID}&redirect_uri={REDIRECT_URI}"
+        st.markdown(f"**1.** [Hacé click acá para re-autorizar]({auth_url})")
+        st.markdown("**2.** Pegá el nuevo código `TG-`:")
+        new_code = st.text_input("Nuevo código TG-", placeholder="TG-XXXXXXXXX", key="reconectar_code")
+        if st.button("Reconectar", type="primary", key="reconectar_btn") and new_code:
+            t = obtener_token_code(new_code.strip().strip('"'))
+            if t:
+                st.session_state.token = t
+                st.success("✅ Reconectado! Ya podés descargar las fotos.")
+                st.rerun()
+            else:
+                st.error("Código inválido o vencido. Generá uno nuevo desde el link de arriba.")
+        st.stop()
+
     st.write(f"**{len(items)}** publicaciones listas para descargar")
     if os.path.exists("listo_paso2.txt") and os.path.exists("portadas_descargadas.zip"):
         with open("portadas_descargadas.zip", "rb") as f:
@@ -166,7 +218,12 @@ elif step == 2:
         st.stop()
 
     if st.button("Descargar todas las fotos", type="primary"):
-        api_headers = {"Authorization": f"Bearer {token}", "User-Agent": "Mozilla/5.0"}
+        # Verificar/renovar token antes de empezar
+        current_token = get_token()
+        if not current_token:
+            st.error("❌ Token vencido. Hacé click en 'Reconectar con MercadoLibre' arriba.")
+            st.stop()
+        api_headers = {"Authorization": f"Bearer {current_token}", "User-Agent": "Mozilla/5.0"}
         img_headers = {"User-Agent": "Mozilla/5.0"}
         bar = st.progress(0, text="Iniciando...")
         fotos = {}
@@ -175,6 +232,16 @@ elif step == 2:
             bar.progress((i+1)/len(items), text=f"Descargando {i+1}/{len(items)}: {item_id}")
             try:
                 r = requests.get(f"https://api.mercadolibre.com/items/{item_id}", headers=api_headers, timeout=10)
+                if r.status_code == 403:
+                    # Token vencido a mitad de proceso, intentar renovar
+                    new_token = renovar_token()
+                    if new_token:
+                        st.session_state.token = new_token
+                        api_headers["Authorization"] = f"Bearer {new_token}"
+                        r = requests.get(f"https://api.mercadolibre.com/items/{item_id}", headers=api_headers, timeout=10)
+                    else:
+                        errores_detalle.append(f"{item_id}: Token vencido y no se pudo renovar. Reconectá tu cuenta.")
+                        break
                 r.raise_for_status()
                 data = r.json()
                 pics = data.get("pictures", [])
@@ -183,19 +250,18 @@ elif step == 2:
                 else:
                     img_url = data.get("thumbnail","").replace("-I.jpg","-O.jpg")
                 if img_url:
-                    # Imágenes de ML no requieren auth, y a veces la rechazan
                     img_r = requests.get(img_url, headers=img_headers, timeout=15)
                     img_r.raise_for_status()
-                    if len(img_r.content) > 1000:  # sanity check: imagen real
+                    if len(img_r.content) > 1000:
                         fotos[item_id] = img_r.content
                     else:
-                        errores_detalle.append(f"{item_id}: respuesta de imagen muy pequeña ({len(img_r.content)} bytes)")
+                        errores_detalle.append(f"{item_id}: imagen inválida ({len(img_r.content)} bytes)")
                 else:
                     errores_detalle.append(f"{item_id}: no se encontró URL de imagen")
             except Exception as e:
                 errores_detalle.append(f"{item_id}: {str(e)}")
             time.sleep(0.2)
-        
+
         if errores_detalle:
             with st.expander(f"⚠️ {len(errores_detalle)} errores al descargar"):
                 for err in errores_detalle:
@@ -204,19 +270,19 @@ elif step == 2:
         bar.progress(1.0, text=f"Listo — {len(fotos)} fotos descargadas")
 
         if len(fotos) == 0:
-            st.error("No se pudo descargar ninguna foto. Revisá los errores de arriba y verificá que el token sea válido.")
+            st.error("No se pudo descargar ninguna foto. El token puede estar vencido — usá el botón 'Reconectar' arriba.")
             st.stop()
 
         zip_buf = io.BytesIO()
         with zipfile.ZipFile(zip_buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-            for iid, content in fotos.items():
-                zf.writestr(f"{iid}.jpg", content)
+            for iid, img_content in fotos.items():
+                zf.writestr(f"{iid}.jpg", img_content)
         zip_buf.seek(0)
         zip_bytes = zip_buf.getvalue()
 
         with open("portadas_descargadas.zip","wb") as f: f.write(zip_bytes)
 
-        st.success(f"✅ {len(fotos)} fotos guardadas en el ZIP ({len(zip_bytes)//1024} KB total)")
+        st.success(f"✅ {len(fotos)} fotos guardadas ({len(zip_bytes)//1024} KB)")
         st.download_button("⬇ Descargar ZIP con todas las fotos", data=zip_bytes,
                            file_name="portadas_ml.zip", mime="application/zip")
         st.info("Procesá el ZIP en Claude para borrar el fondo, luego continuá.")
