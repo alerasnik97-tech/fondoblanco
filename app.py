@@ -205,125 +205,121 @@ elif step == 2:
     if os.path.exists("listo_paso2.txt"):
         st.success("✅ Fotos descargadas correctamente.")
         if st.button("Continuar al Paso 3 →", type="primary"):
-            if os.path.exists("listo_paso2.txt"): os.remove("listo_paso2.txt")
-            if os.path.exists("img_urls.json"): os.remove("img_urls.json")
+            for f in ["listo_paso2.txt", "img_urls.json"]:
+                if os.path.exists(f): os.remove(f)
             save_step(3)
             st.rerun()
         st.stop()
 
+    IMG_URLS_FILE = "img_urls.json"
     current_token = get_token() or ""
-    items_json = json.dumps(items)
 
+    # ── Servidor obtiene las URLs usando access_token como query param ──
+    if not os.path.exists(IMG_URLS_FILE):
+        if st.button("Obtener fotos de portada", type="primary"):
+            bar = st.progress(0, text="Obteniendo datos...")
+            img_urls = {}
+            errores = []
+            for i, item_id in enumerate(items):
+                bar.progress((i+1)/len(items), text=f"{i+1}/{len(items)}: {item_id}")
+                try:
+                    r = requests.get(
+                        f"https://api.mercadolibre.com/items/{item_id}",
+                        params={"access_token": current_token},
+                        headers={"User-Agent": "Mozilla/5.0"},
+                        timeout=12)
+                    if r.status_code == 200:
+                        data = r.json()
+                        pics = data.get("pictures", [])
+                        url = (pics[0].get("secure_url") or pics[0].get("url","")) if pics else \
+                              data.get("thumbnail","").replace("-I.jpg","-O.jpg")
+                        if url:
+                            img_urls[item_id] = url
+                        else:
+                            errores.append(f"{item_id}: sin URL")
+                    else:
+                        errores.append(f"{item_id}: HTTP {r.status_code} — {r.text[:120]}")
+                except Exception as e:
+                    errores.append(f"{item_id}: {str(e)}")
+                time.sleep(0.2)
+            bar.progress(1.0, text="Listo")
+            if errores:
+                with st.expander(f"⚠️ {len(errores)} ítems con error"):
+                    for e in errores: st.text(e)
+            if img_urls:
+                with open(IMG_URLS_FILE, "w") as f: json.dump(img_urls, f)
+                st.success(f"✅ {len(img_urls)} URLs obtenidas. Ahora descargá el ZIP.")
+                st.rerun()
+            else:
+                st.error("No se pudo obtener ninguna URL. Reconectate con el botón del sidebar.")
+        st.stop()
+
+    # ── JS descarga las imágenes desde el CDN de ML ──
+    with open(IMG_URLS_FILE) as f:
+        img_urls = json.load(f)
+    st.success(f"✅ {len(img_urls)} URLs listas. Descargá el ZIP:")
+
+    urls_json = json.dumps(img_urls)
     js_component = f"""<!DOCTYPE html>
-<html>
-<body style="margin:0;padding:8px 0;background:transparent;font-family:sans-serif">
-<button id="btn" onclick="startDownload()" style="
-  background:#e53935;color:white;border:none;padding:12px 28px;
-  font-size:15px;border-radius:8px;cursor:pointer;font-weight:700">
-  ⬇ Descargar fotos de portada
+<html><body style="margin:0;padding:8px 0;background:transparent;font-family:sans-serif">
+<button id="btn" onclick="go()" style="background:#e53935;color:white;border:none;
+  padding:11px 26px;font-size:15px;border-radius:8px;cursor:pointer;font-weight:700">
+  📥 Descargar ZIP de fotos
 </button>
 <div id="log" style="margin-top:10px;font-size:13px;color:#ccc;min-height:18px"></div>
-<div id="bar-wrap" style="display:none;margin-top:8px;background:#444;border-radius:6px;height:8px;width:98%">
-  <div id="bar" style="background:#3483FA;height:8px;border-radius:6px;width:0%;transition:width .2s"></div>
+<div id="bw" style="display:none;margin-top:8px;background:#444;border-radius:5px;height:7px;width:98%">
+  <div id="bar" style="background:#3483FA;height:7px;border-radius:5px;width:0%"></div>
 </div>
-<div id="link-area" style="margin-top:12px"></div>
-
+<div id="link" style="margin-top:12px"></div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"
   integrity="sha512-XMVd28F1oH/O71fzwBnV7HucLxVwtxf26XV8P4wPk26EDxuGZ91N8bsOttmnomcCD3CS5ZMRL50H0GgOHvegtg=="
-  crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+  crossorigin="anonymous"></script>
 <script>
-const ITEMS = {items_json};
-const TOKEN = "{current_token}";
-
-const log = t => document.getElementById('log').innerText = t;
-const setBar = p => {{
-  document.getElementById('bar-wrap').style.display = 'block';
-  document.getElementById('bar').style.width = p + '%';
-}};
-
-async function fetchItem(itemId) {{
-  // Intentar con token en query param (evita CORS preflight y el bloqueo de IP del servidor)
-  const urls = [
-    `https://api.mercadolibre.com/items/${{itemId}}?access_token=${{TOKEN}}`,
-    `https://api.mercadolibre.com/items/${{itemId}}`
-  ];
-  for (const url of urls) {{
+const URLS = {urls_json};
+const L = t => document.getElementById('log').innerText = t;
+const B = p => {{ document.getElementById('bw').style.display='block'; document.getElementById('bar').style.width=p+'%'; }};
+async function go() {{
+  const btn=document.getElementById('btn');
+  btn.disabled=true; btn.innerText='⏳ Descargando...';
+  const zip=new JSZip(); let ok=0, errs=[];
+  const entries=Object.entries(URLS);
+  for (let i=0;i<entries.length;i++) {{
+    const [id,url]=entries[i];
+    L((i+1)+'/'+entries.length+': '+id); B(Math.round(i/entries.length*90));
     try {{
-      const r = await fetch(url);
-      if (r.ok) return await r.json();
-    }} catch(e) {{}}
+      const r=await fetch(url);
+      if (!r.ok) {{ errs.push(id+': '+r.status); continue; }}
+      const b=await r.blob();
+      if (b.size<500) {{ errs.push(id+': muy pequeña'); continue; }}
+      zip.file(id+'.jpg',b); ok++;
+    }} catch(e) {{ errs.push(id+': '+e.message); }}
   }}
-  return null;
+  if (!ok) {{ L('❌ '+errs.join(' | ')); btn.disabled=false; btn.innerText='↺ Reintentar'; return; }}
+  L('Generando ZIP...'); B(96);
+  const blob=await zip.generateAsync({{type:'blob',compression:'DEFLATE'}});
+  B(100); L('✅ '+ok+' fotos'+(errs.length?' ('+errs.length+' errores)':''));
+  btn.innerText='✅ Listo';
+  const u=URL.createObjectURL(blob);
+  document.getElementById('link').innerHTML=
+    '<a href="'+u+'" download="portadas_ml.zip" style="display:inline-block;background:#3483FA;'+
+    'color:white;padding:10px 22px;border-radius:8px;font-weight:700;font-size:14px;text-decoration:none">'+
+    '📥 Descargar portadas_ml.zip</a>'+
+    (errs.length?'<div style="margin-top:6px;font-size:11px;color:#f88">Errores: '+errs.join(', ')+'</div>':'');
 }}
+</script></body></html>"""
 
-async function startDownload() {{
-  const btn = document.getElementById('btn');
-  btn.disabled = true; btn.innerText = '⏳ Descargando...';
-  const zip = new JSZip();
-  let ok = 0, errs = [];
-
-  for (let i = 0; i < ITEMS.length; i++) {{
-    const itemId = ITEMS[i];
-    log(`${{i+1}}/${{ITEMS.length}}: obteniendo ${{itemId}}...`);
-    setBar(Math.round((i / ITEMS.length) * 85));
-
-    const data = await fetchItem(itemId);
-    if (!data) {{ errs.push(`${{itemId}}: no se pudo obtener datos`); continue; }}
-
-    let imgUrl = '';
-    if (data.pictures && data.pictures.length > 0) {{
-      imgUrl = data.pictures[0].secure_url || data.pictures[0].url || '';
-    }} else {{
-      imgUrl = (data.thumbnail || '').replace('-I.jpg', '-O.jpg');
-    }}
-    if (!imgUrl) {{ errs.push(`${{itemId}}: sin URL de imagen`); continue; }}
-
-    log(`${{i+1}}/${{ITEMS.length}}: descargando imagen ${{itemId}}...`);
-    try {{
-      const ir = await fetch(imgUrl);
-      if (!ir.ok) {{ errs.push(`${{itemId}}: imagen ${{ir.status}}`); continue; }}
-      const blob = await ir.blob();
-      if (blob.size < 500) {{ errs.push(`${{itemId}}: imagen inválida`); continue; }}
-      zip.file(`${{itemId}}.jpg`, blob);
-      ok++;
-    }} catch(e) {{ errs.push(`${{itemId}}: ${{e.message}}`); }}
-  }}
-
-  if (ok === 0) {{
-    log('❌ No se pudo descargar ninguna foto. ' + errs.join(' | '));
-    btn.disabled = false; btn.innerText = '↺ Reintentar';
-    return;
-  }}
-
-  log(`Generando ZIP con ${{ok}} fotos...`); setBar(93);
-  const blob = await zip.generateAsync({{type:'blob', compression:'DEFLATE'}});
-  const blobUrl = URL.createObjectURL(blob);
-  setBar(100);
-
-  const msg = ok + ' foto' + (ok>1?'s':'') + ' listas' + (errs.length ? ` (${{errs.length}} errores)` : '');
-  log('✅ ' + msg);
-  btn.innerText = '✅ ' + msg;
-
-  document.getElementById('link-area').innerHTML =
-    `<a href="${{blobUrl}}" download="portadas_ml.zip" style="
-      display:inline-block;background:#3483FA;color:white;padding:10px 22px;
-      border-radius:8px;font-weight:700;font-size:14px;text-decoration:none">
-      📥 Descargar portadas_ml.zip
-    </a>` + (errs.length ? `<div style="margin-top:8px;font-size:12px;color:#f88">Errores: ${{errs.join(', ')}}</div>` : '');
-}}
-</script>
-</body></html>"""
-
-    st.components.v1.html(js_component, height=160, scrolling=False)
+    st.components.v1.html(js_component, height=150, scrolling=False)
     st.divider()
-    st.caption("1️⃣ Hacé click en el botón rojo → 2️⃣ Descargá el ZIP con el link azul → 3️⃣ Continuá")
-    if st.button("✅ Ya descargué el ZIP — Continuar al Paso 3", type="primary"):
-        with open("listo_paso2.txt","w") as f: f.write("ok")
-        save_step(3)
-        st.rerun()
-    if st.button("↺ Volver a obtener URLs"):
-        if os.path.exists("img_urls.json"): os.remove("img_urls.json")
-        st.rerun()
+    st.caption("1️⃣ Botón rojo → descarga imágenes  |  2️⃣ Link azul → guardá el ZIP  |  3️⃣ Continuá")
+    col1, col2 = st.columns([2,1])
+    with col1:
+        if st.button("✅ Ya descargué el ZIP — Continuar al Paso 3", type="primary"):
+            with open("listo_paso2.txt","w") as f: f.write("ok")
+            save_step(3); st.rerun()
+    with col2:
+        if st.button("↺ Reintentar desde cero"):
+            if os.path.exists(IMG_URLS_FILE): os.remove(IMG_URLS_FILE)
+            st.rerun()
 
 # ══ PASO 3 ══
 elif step == 3:
