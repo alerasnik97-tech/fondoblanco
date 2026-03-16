@@ -236,21 +236,11 @@ elif step == 2:
         for i, item_id in enumerate(items):
             bar.progress((i+1)/len(items), text=f"Descargando {i+1}/{len(items)}: {item_id}")
             try:
-                r = requests.get(f"https://api.mercadolibre.com/items/{item_id}", headers=api_headers, timeout=10)
-                if r.status_code == 403:
-                    # Token vencido a mitad de proceso, intentar renovar
-                    new_token = renovar_token()
-                    if new_token:
-                        st.session_state.token = new_token
-                        api_headers["Authorization"] = f"Bearer {new_token}"
-                        r = requests.get(f"https://api.mercadolibre.com/items/{item_id}", headers=api_headers, timeout=10)
-                    else:
-                        try:
-                            msg = r.json().get("message", r.text[:200])
-                        except:
-                            msg = r.text[:200]
-                        errores_detalle.append(f"{item_id}: 403 — {msg} | Causa probable: la app no tiene permiso 'read_listings'. Reconectá con el nuevo link de autorización.")
-                        break
+                # /items/{id} es endpoint público — NO usar Bearer token
+                # (ML rechaza con 403 si la app no tiene el scope correcto)
+                r = requests.get(
+                    f"https://api.mercadolibre.com/items/{item_id}",
+                    headers=img_headers, timeout=10)
                 r.raise_for_status()
                 data = r.json()
                 pics = data.get("pictures", [])
