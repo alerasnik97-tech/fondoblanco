@@ -17,6 +17,7 @@ except KeyError:
     st.stop()
 
 REDIRECT_URI  = "https://httpbin.org/get"
+ML_SCOPES     = "offline_access read_listings write_listings"
 TOKEN_FILE    = "ml_token.json"
 ITEMS_FILE    = "items.json"
 STEP_FILE     = "step.json"
@@ -116,7 +117,7 @@ if not token:
     st.divider()
     st.subheader("Conectar con MercadoLibre")
     st.warning("⚠️ No hay sesión activa o el token venció. Volvé a autorizar la app.")
-    auth_url = f"https://auth.mercadolibre.com.ar/authorization?response_type=code&client_id={CLIENT_ID}&redirect_uri={REDIRECT_URI}"
+    auth_url = f"https://auth.mercadolibre.com.ar/authorization?response_type=code&client_id={CLIENT_ID}&redirect_uri={REDIRECT_URI}&scope={ML_SCOPES.replace(" ", "%20")}"
     st.markdown(f"**Paso 1:** [Hacé click acá para autorizar]({auth_url})")
     st.markdown("**Paso 2:** Pegá el código `TG-` que aparece en la URL:")
     code = st.text_input("Código TG-", placeholder="TG-XXXXXXXXX")
@@ -133,7 +134,7 @@ else:
     # Mostrar botón de reconexión siempre visible en el sidebar
     with st.sidebar:
         st.caption("🔒 Sesión activa")
-        auth_url = f"https://auth.mercadolibre.com.ar/authorization?response_type=code&client_id={CLIENT_ID}&redirect_uri={REDIRECT_URI}"
+        auth_url = f"https://auth.mercadolibre.com.ar/authorization?response_type=code&client_id={CLIENT_ID}&redirect_uri={REDIRECT_URI}&scope={ML_SCOPES.replace(" ", "%20")}"
         if st.button("Reconectar con ML"):
             # Limpiar token viejo
             st.session_state.pop("token", None)
@@ -188,7 +189,7 @@ elif step == 2:
 
     if not token_ok:
         st.error("❌ Tu sesión de MercadoLibre venció. Reconectate sin perder las publicaciones importadas:")
-        auth_url = f"https://auth.mercadolibre.com.ar/authorization?response_type=code&client_id={CLIENT_ID}&redirect_uri={REDIRECT_URI}"
+        auth_url = f"https://auth.mercadolibre.com.ar/authorization?response_type=code&client_id={CLIENT_ID}&redirect_uri={REDIRECT_URI}&scope={ML_SCOPES.replace(" ", "%20")}"
         st.markdown(f"**1.** [Hacé click acá para re-autorizar]({auth_url})")
         st.markdown("**2.** Pegá el nuevo código `TG-`:")
         new_code = st.text_input("Nuevo código TG-", placeholder="TG-XXXXXXXXX", key="reconectar_code")
@@ -221,10 +222,14 @@ elif step == 2:
         # Verificar/renovar token antes de empezar
         current_token = get_token()
         if not current_token:
-            st.error("❌ Token vencido. Hacé click en 'Reconectar con MercadoLibre' arriba.")
+            st.error("❌ Token vencido. Reconectate usando el link de arriba.")
             st.stop()
         api_headers = {"Authorization": f"Bearer {current_token}", "User-Agent": "Mozilla/5.0"}
         img_headers = {"User-Agent": "Mozilla/5.0"}
+
+        # Mostrar quién está logueado
+        me = requests.get("https://api.mercadolibre.com/users/me", headers=api_headers, timeout=8).json()
+        st.info(f"🔑 Conectado como: **{me.get('nickname','?')}** (ID: {me.get('id','?')})")
         bar = st.progress(0, text="Iniciando...")
         fotos = {}
         errores_detalle = []
@@ -240,7 +245,11 @@ elif step == 2:
                         api_headers["Authorization"] = f"Bearer {new_token}"
                         r = requests.get(f"https://api.mercadolibre.com/items/{item_id}", headers=api_headers, timeout=10)
                     else:
-                        errores_detalle.append(f"{item_id}: Token vencido y no se pudo renovar. Reconectá tu cuenta.")
+                        try:
+                            msg = r.json().get("message", r.text[:200])
+                        except:
+                            msg = r.text[:200]
+                        errores_detalle.append(f"{item_id}: 403 — {msg} | Causa probable: la app no tiene permiso 'read_listings'. Reconectá con el nuevo link de autorización.")
                         break
                 r.raise_for_status()
                 data = r.json()
