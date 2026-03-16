@@ -223,9 +223,9 @@ elif step == 2:
             for i, item_id in enumerate(items):
                 bar.progress((i+1)/len(items), text=f"{i+1}/{len(items)}: {item_id}")
                 try:
+                    # /items es endpoint público — sin token (el token causa access_denied si la app no tiene scope)
                     r = requests.get(
                         f"https://api.mercadolibre.com/items/{item_id}",
-                        params={"access_token": current_token},
                         headers={"User-Agent": "Mozilla/5.0"},
                         timeout=12)
                     if r.status_code == 200:
