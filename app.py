@@ -223,11 +223,21 @@ elif step == 2:
             for i, item_id in enumerate(items):
                 bar.progress((i+1)/len(items), text=f"{i+1}/{len(items)}: {item_id}")
                 try:
-                    # /items es endpoint público — sin token (el token causa access_denied si la app no tiene scope)
+                    # Bearer header — igual que en Paso 4 donde sí funciona
                     r = requests.get(
                         f"https://api.mercadolibre.com/items/{item_id}",
-                        headers={"User-Agent": "Mozilla/5.0"},
+                        headers={"Authorization": f"Bearer {current_token}", "User-Agent": "Mozilla/5.0"},
                         timeout=12)
+                    if r.status_code == 403:
+                        # Intentar renovar token y reintentar una vez
+                        new_t = renovar_token()
+                        if new_t:
+                            current_token = new_t
+                            st.session_state.token = new_t
+                            r = requests.get(
+                                f"https://api.mercadolibre.com/items/{item_id}",
+                                headers={"Authorization": f"Bearer {current_token}", "User-Agent": "Mozilla/5.0"},
+                                timeout=12)
                     if r.status_code == 200:
                         data = r.json()
                         pics = data.get("pictures", [])
