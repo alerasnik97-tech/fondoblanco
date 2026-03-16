@@ -9,7 +9,7 @@ import time
 from PIL import Image
 
 CLIENT_ID     = "4692870472324774"
-CLIENT_SECRET = "TU_CLIENT_SECRET"
+CLIENT_SECRET = "TG-69b78150e56f0900015f1199-316433399"
 REDIRECT_URI  = "https://httpbin.org/get"
 TOKEN_FILE    = "ml_token.json"
 ITEMS_FILE    = "items.json"
