@@ -404,32 +404,19 @@ elif step == 4:
 
                     ancho, alto = img.size
 
-                    # Queremos que la imagen tenga tamaño visual similar a tus otras fotos
-                    target_long_side = 900
+                    # lado máximo permitido
+                    max_side = 1200
 
-                    scale = target_long_side / max(ancho, alto)
+                    scale = max_side / max(ancho, alto)
 
                     nuevo_ancho = int(ancho * scale)
                     nuevo_alto = int(alto * scale)
 
                     img = img.resize((nuevo_ancho, nuevo_alto), Image.Resampling.LANCZOS)
 
-                    ancho, alto = img.size
-
-                    # Lienzo final igual a tus otras fotos
-                    canvas_w = 1200
-                    canvas_h = 900
-
-                    canvas = Image.new("RGB", (canvas_w, canvas_h), (255,255,255))
-
-                    x = (canvas_w - ancho) // 2
-                    y = (canvas_h - alto) // 2
-
-                    canvas.paste(img, (x,y))
-
                     buf = io.BytesIO()
 
-                    canvas.save(
+                    img.save(
                         buf,
                         format="JPEG",
                         quality=97,
