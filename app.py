@@ -506,9 +506,15 @@ elif step == 4:
                 for e in errores_detalle:
                     st.text(e)
 
-        st.divider()
+        # Marcar que el proceso terminó
+        st.session_state["subida_completa"] = True
+        st.rerun()
+
+    # Botón afuera del bloque — se muestra cuando el proceso ya terminó
+    if st.session_state.get("subida_completa"):
         st.divider()
         if st.button("↺ Volver al inicio", type="primary"):
             for f in ["items.json","step.json","listo_paso2.txt","portadas_descargadas.zip","procesadas.zip","img_urls.json"]:
                 if os.path.exists(f): os.remove(f)
+            st.session_state.pop("subida_completa", None)
             st.rerun()
