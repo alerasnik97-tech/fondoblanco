@@ -180,8 +180,8 @@ else:
 st.divider()
 for n, title, desc in [
     (1,"Importar publicaciones","Subí tu planilla Excel"),
-    (2,"Descargar fotos de portada","Se obtienen las fotos actuales"),
-    (3,"Procesar fondo blanco","Procesado automático o subí tu ZIP"),
+    (2,"Descargar y procesar fotos","Se descargan y quita el fondo automáticamente"),
+    (3,"Vista previa","Revisá todas las fotos antes de subir"),
     (4,"Subir fotos actualizadas","Se reemplaza la portada en ML"),
 ]:
     cls = "step-done" if step > n else ("step-active" if step == n else "")
@@ -204,9 +204,10 @@ if step == 1:
             save_step(2)
             st.rerun()
 
+
 # ══ PASO 2 ══
 elif step == 2:
-    st.subheader("Paso 2 — Descargar fotos de portada")
+    st.subheader("Paso 2 — Descargar y procesar fotos")
     if not items:
         st.warning("No hay publicaciones. Volvé al Paso 1.")
         if st.button("← Volver al Paso 1"):
@@ -214,8 +215,8 @@ elif step == 2:
             st.rerun()
         st.stop()
 
-    test_token = get_token()
-    if not test_token:
+    current_token = get_token()
+    if not current_token:
         st.error("❌ Tu sesión de MercadoLibre venció. Reconectate sin perder las publicaciones importadas:")
         auth_url = f"https://auth.mercadolibre.com.ar/authorization?response_type=code&client_id={CLIENT_ID}&redirect_uri={REDIRECT_URI}&scope={ML_SCOPES.replace(' ', '%20')}"
         st.markdown(f"**1.** [Hacé click acá para re-autorizar]({auth_url})")
@@ -231,28 +232,38 @@ elif step == 2:
                 st.error("Código inválido o vencido.")
         st.stop()
 
-    st.write(f"**{len(items)}** publicaciones listas para descargar")
-
-    if os.path.exists("listo_paso2.txt"):
-        st.success("✅ Fotos descargadas correctamente.")
-        if st.button("Continuar al Paso 3 →", type="primary"):
-            for f in ["listo_paso2.txt", "img_urls.json"]:
-                if os.path.exists(f): os.remove(f)
-            save_step(3)
-            st.rerun()
+    if not REMBG_DISPONIBLE:
+        st.error("❌ La librería `rembg` no está instalada. Agregala al requirements.txt y reiniciá la app.")
         st.stop()
 
-    IMG_URLS_FILE = "img_urls.json"
-    current_token = get_token() or ""
+    # Si procesadas.zip ya existe, mostrar opción de continuar
+    if os.path.exists("procesadas.zip"):
+        with zipfile.ZipFile("procesadas.zip") as zf:
+            cant = len([n for n in zf.namelist() if n.upper().startswith("MLA")])
+        st.success(f"✅ {cant} fotos ya procesadas.")
+        col1, col2 = st.columns([2, 1])
+        with col1:
+            if st.button("Continuar al Paso 3 →", type="primary"):
+                save_step(3)
+                st.rerun()
+        with col2:
+            if st.button("↺ Reprocesar desde cero"):
+                if os.path.exists("procesadas.zip"): os.remove("procesadas.zip")
+                st.rerun()
+        st.stop()
 
-    if not os.path.exists(IMG_URLS_FILE):
-        if st.button("Obtener fotos de portada", type="primary"):
-            bar = st.progress(0, text="Obteniendo datos...")
-            img_urls = {}
-            errores = []
+    st.info(f"Se van a descargar y procesar **{len(items)}** fotos directamente desde MercadoLibre. Esto puede tardar unos minutos.")
+
+    if st.button("🚀 Descargar y quitar fondo ahora", type="primary"):
+        bar = st.progress(0, text="Iniciando...")
+        errores = []
+        zip_out_buf = io.BytesIO()
+
+        with zipfile.ZipFile(zip_out_buf, "w", zipfile.ZIP_DEFLATED) as zf_out:
             for i, item_id in enumerate(items):
-                bar.progress((i+1)/len(items), text=f"{i+1}/{len(items)}: {item_id}")
+                bar.progress((i + 1) / len(items), text=f"{i+1}/{len(items)}: {item_id}")
                 try:
+                    # 1. Obtener URL de portada desde ML API
                     r = requests.get(
                         f"https://api.mercadolibre.com/items/{item_id}",
                         headers={"Authorization": f"Bearer {current_token}", "User-Agent": "Mozilla/5.0"},
@@ -266,209 +277,85 @@ elif step == 2:
                                 f"https://api.mercadolibre.com/items/{item_id}",
                                 headers={"Authorization": f"Bearer {current_token}", "User-Agent": "Mozilla/5.0"},
                                 timeout=12)
-                    if r.status_code == 200:
-                        data = r.json()
-                        pics = data.get("pictures", [])
-                        url = (pics[0].get("secure_url") or pics[0].get("url","")) if pics else \
-                              data.get("thumbnail","").replace("-I.jpg","-O.jpg")
-                        if url:
-                            img_urls[item_id] = url
-                        else:
-                            errores.append(f"{item_id}: sin URL")
-                    else:
-                        errores.append(f"{item_id}: HTTP {r.status_code} — {r.text[:120]}")
+                    if r.status_code != 200:
+                        errores.append(f"{item_id}: HTTP {r.status_code}")
+                        continue
+                    data = r.json()
+                    pics = data.get("pictures", [])
+                    url = (pics[0].get("secure_url") or pics[0].get("url", "")) if pics else \
+                          data.get("thumbnail", "").replace("-I.jpg", "-O.jpg")
+                    if not url:
+                        errores.append(f"{item_id}: sin URL de imagen")
+                        continue
+
+                    # 2. Descargar la imagen
+                    img_r = requests.get(url, timeout=20)
+                    if img_r.status_code != 200 or len(img_r.content) < 500:
+                        errores.append(f"{item_id}: error descargando imagen")
+                        continue
+
+                    # 3. Aplicar fondo blanco
+                    resultado_bytes = aplicar_fondo_blanco(img_r.content)
+                    zf_out.writestr(f"{item_id}_resultado.jpg", resultado_bytes)
+
                 except Exception as e:
                     errores.append(f"{item_id}: {str(e)}")
-                time.sleep(0.2)
-            bar.progress(1.0, text="Listo")
-            if errores:
-                with st.expander(f"⚠️ {len(errores)} ítems con error"):
-                    for e in errores: st.text(e)
-            if img_urls:
-                with open(IMG_URLS_FILE, "w") as f: json.dump(img_urls, f)
-                st.success(f"✅ {len(img_urls)} URLs obtenidas. Ahora descargá el ZIP.")
-                st.rerun()
-            else:
-                st.error("❌ Error de permisos (access_denied). Tu app de MercadoLibre no tiene el scope `read_listings` habilitado.")
-                st.warning("""**Para solucionarlo:**
-1. Entrá a https://developers.mercadolibre.com.ar/devcenter
-2. Abrí tu app → sección **Scopes/Permisos**
-3. Habilitá **read_listings** y **write_listings** → Guardá
-4. Volvé acá y hacé click en **Reconectar con ML** (botón del sidebar izquierdo)""")
-        st.stop()
+                time.sleep(0.1)
 
-    with open(IMG_URLS_FILE) as f:
-        img_urls = json.load(f)
-    st.success(f"✅ {len(img_urls)} URLs listas. Descargá el ZIP:")
+        bar.progress(1.0, text="✅ Completado")
 
-    urls_json = json.dumps(img_urls)
-    js_component = f"""<!DOCTYPE html>
-<html><body style="margin:0;padding:8px 0;background:transparent;font-family:sans-serif">
-<button id="btn" onclick="go()" style="background:#e53935;color:white;border:none;
-  padding:11px 26px;font-size:15px;border-radius:8px;cursor:pointer;font-weight:700">
-  📥 Descargar ZIP de fotos
-</button>
-<div id="log" style="margin-top:10px;font-size:13px;color:#ccc;min-height:18px"></div>
-<div id="bw" style="display:none;margin-top:8px;background:#444;border-radius:5px;height:7px;width:98%">
-  <div id="bar" style="background:#3483FA;height:7px;border-radius:5px;width:0%"></div>
-</div>
-<div id="link" style="margin-top:12px"></div>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"
-  integrity="sha512-XMVd28F1oH/O71fzwBnV7HucLxVwtxf26XV8P4wPk26EDxuGZ91N8bsOttmnomcCD3CS5ZMRL50H0GgOHvegtg=="
-  crossorigin="anonymous"></script>
-<script>
-const URLS = {urls_json};
-const L = t => document.getElementById('log').innerText = t;
-const B = p => {{ document.getElementById('bw').style.display='block'; document.getElementById('bar').style.width=p+'%'; }};
-async function go() {{
-  const btn=document.getElementById('btn');
-  btn.disabled=true; btn.innerText='⏳ Descargando...';
-  const zip=new JSZip(); let ok=0, errs=[];
-  const entries=Object.entries(URLS);
-  for (let i=0;i<entries.length;i++) {{
-    const [id,url]=entries[i];
-    L((i+1)+'/'+entries.length+': '+id); B(Math.round(i/entries.length*90));
-    try {{
-      const r=await fetch(url);
-      if (!r.ok) {{ errs.push(id+': '+r.status); continue; }}
-      const b=await r.blob();
-      if (b.size<500) {{ errs.push(id+': muy pequeña'); continue; }}
-      zip.file(id+'.jpg',b); ok++;
-    }} catch(e) {{ errs.push(id+': '+e.message); }}
-  }}
-  if (!ok) {{ L('❌ '+errs.join(' | ')); btn.disabled=false; btn.innerText='↺ Reintentar'; return; }}
-  L('Generando ZIP...'); B(96);
-  const blob=await zip.generateAsync({{type:'blob',compression:'DEFLATE'}});
-  B(100); L('✅ '+ok+' fotos'+(errs.length?' ('+errs.length+' errores)':''));
-  btn.innerText='✅ Listo';
-  const u=URL.createObjectURL(blob);
-  document.getElementById('link').innerHTML=
-    '<a href="'+u+'" download="portadas_ml.zip" style="display:inline-block;background:#3483FA;'+
-    'color:white;padding:10px 22px;border-radius:8px;font-weight:700;font-size:14px;text-decoration:none">'+
-    '📥 Descargar portadas_ml.zip</a>'+
-    (errs.length?'<div style="margin-top:6px;font-size:11px;color:#f88">Errores: '+errs.join(', ')+'</div>':'');
-}}
-</script></body></html>"""
+        zip_out_bytes = zip_out_buf.getvalue()
+        with open("procesadas.zip", "wb") as f:
+            f.write(zip_out_bytes)
 
-    st.components.v1.html(js_component, height=150, scrolling=False)
-    st.divider()
-    st.caption("1️⃣ Botón rojo → descarga imágenes  |  2️⃣ Link azul → guardá el ZIP  |  3️⃣ Continuá")
-    col1, col2 = st.columns([2,1])
-    with col1:
-        if st.button("✅ Ya descargué el ZIP — Continuar al Paso 3", type="primary"):
-            with open("listo_paso2.txt","w") as f: f.write("ok")
-            save_step(3); st.rerun()
-    with col2:
-        if st.button("↺ Reintentar desde cero"):
-            if os.path.exists(IMG_URLS_FILE): os.remove(IMG_URLS_FILE)
-            st.rerun()
+        if errores:
+            with st.expander(f"⚠️ {len(errores)} errores"):
+                for e in errores: st.text(e)
+
+        st.success(f"✅ {len(items) - len(errores)} fotos procesadas con fondo blanco")
+        st.rerun()
 
 # ══ PASO 3 ══
 elif step == 3:
-    st.subheader("Paso 3 — Procesar fondo blanco")
-    if st.button("← Volver al Paso 2 (descargar fotos de nuevo)"):
+    st.subheader("Paso 3 — Vista previa de fotos procesadas")
+    if st.button("← Volver al Paso 2"):
         save_step(2)
         st.rerun()
 
-    tab_auto, tab_manual = st.tabs(["🤖 Procesar automáticamente", "📁 Subir ZIP ya procesado"])
+    if not os.path.exists("procesadas.zip"):
+        st.warning("No hay fotos procesadas. Volvé al Paso 2.")
+        st.stop()
 
-    # ── Tab 1: procesamiento automático con rembg ──
-    with tab_auto:
-        if not REMBG_DISPONIBLE:
-            st.error("❌ La librería `rembg` no está instalada.")
-            st.code("pip install rembg onnxruntime", language="bash")
-            st.info("Instalá la librería y reiniciá la app para usar esta función.")
-        else:
-            st.info("Subí el ZIP de portadas descargado en el Paso 2. La app removerá el fondo y colocará fondo blanco automáticamente.")
-            zip_orig = st.file_uploader("Subí el ZIP de portadas originales (portadas_ml.zip)", type=["zip"], key="zip_orig")
-            if zip_orig:
-                zip_orig_bytes = zip_orig.read()
-                with zipfile.ZipFile(io.BytesIO(zip_orig_bytes)) as zf:
-                    nombres_orig = [n for n in zf.namelist() if n.lower().endswith((".jpg", ".jpeg", ".png"))]
+    with open("procesadas.zip", "rb") as f:
+        zip_bytes = f.read()
 
-                st.write(f"**{len(nombres_orig)}** imágenes encontradas en el ZIP")
+    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+        nombres_prev = [n for n in zf.namelist() if n.upper().startswith("MLA")]
 
-                if st.button("🚀 Procesar fondo blanco ahora", type="primary", key="btn_procesar"):
-                    bar = st.progress(0, text="Iniciando procesamiento...")
-                    errores_proc = []
-                    zip_out_buf = io.BytesIO()
+    st.success(f"✅ {len(nombres_prev)} fotos listas para subir")
+    st.download_button(
+        label="💾 Descargar ZIP procesado (opcional)",
+        data=zip_bytes,
+        file_name="procesadas_fondo_blanco.zip",
+        mime="application/zip"
+    )
+    st.divider()
+    st.write(f"**Vista previa de las {len(nombres_prev)} fotos procesadas:**")
 
-                    with zipfile.ZipFile(io.BytesIO(zip_orig_bytes)) as zf_in, \
-                         zipfile.ZipFile(zip_out_buf, "w", zipfile.ZIP_DEFLATED) as zf_out:
+    COLS = 5
+    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+        for fila_start in range(0, len(nombres_prev), COLS):
+            fila = nombres_prev[fila_start:fila_start + COLS]
+            cols = st.columns(COLS)
+            for idx, nombre in enumerate(fila):
+                with cols[idx]:
+                    img = Image.open(io.BytesIO(zf.read(nombre)))
+                    st.image(img, caption=nombre.split("_resultado")[0], use_container_width=True)
 
-                        for i, nombre in enumerate(nombres_orig):
-                            bar.progress((i + 1) / len(nombres_orig), text=f"Procesando {i+1}/{len(nombres_orig)}: {nombre}")
-                            try:
-                                img_bytes = zf_in.read(nombre)
-                                resultado_bytes = aplicar_fondo_blanco(img_bytes)
-                                item_id = os.path.splitext(nombre)[0]
-                                nombre_out = f"{item_id}_resultado.jpg"
-                                zf_out.writestr(nombre_out, resultado_bytes)
-                            except Exception as e:
-                                errores_proc.append(f"{nombre}: {str(e)}")
-
-                    bar.progress(1.0, text="✅ Procesamiento completado")
-
-                    if errores_proc:
-                        with st.expander(f"⚠️ {len(errores_proc)} errores"):
-                            for e in errores_proc:
-                                st.text(e)
-
-                    procesadas_ok = len(nombres_orig) - len(errores_proc)
-                    st.success(f"✅ {procesadas_ok} imágenes procesadas con fondo blanco")
-
-                    zip_out_bytes = zip_out_buf.getvalue()
-                    with open("procesadas.zip", "wb") as f:
-                        f.write(zip_out_bytes)
-                    st.rerun()
-
-                # Botón continuar: siempre visible si procesadas.zip ya existe
-                if os.path.exists("procesadas.zip"):
-                    st.success("✅ ZIP procesado listo.")
-                    with open("procesadas.zip", "rb") as f:
-                        zip_descarga = f.read()
-
-                    # Preview de las primeras 5 imágenes
-                    with zipfile.ZipFile(io.BytesIO(zip_descarga)) as zf_prev:
-                        nombres_prev = [n for n in zf_prev.namelist() if n.upper().startswith("MLA")]
-                        if nombres_prev:
-                            st.write("**Vista previa (primeras 5 fotos procesadas):**")
-                            cols = st.columns(min(5, len(nombres_prev)))
-                            for idx, nombre in enumerate(nombres_prev[:5]):
-                                with cols[idx]:
-                                    img = Image.open(io.BytesIO(zf_prev.read(nombre)))
-                                    st.image(img, caption=nombre.split("_resultado")[0], use_container_width=True)
-
-                    st.download_button(
-                        label="💾 Descargar ZIP procesado (opcional)",
-                        data=zip_descarga,
-                        file_name="procesadas_fondo_blanco.zip",
-                        mime="application/zip"
-                    )
-                    if st.button("Continuar al Paso 4 →", type="primary", key="continuar_paso4_auto"):
-                        save_step(4)
-                        st.rerun()
-
-    # ── Tab 2: subir ZIP ya procesado (comportamiento original) ──
-    with tab_manual:
-        st.info("Si ya procesaste las fotos externamente, subí el ZIP aquí. Los archivos deben llamarse: `MLA1234567890_resultado.jpg`")
-        zip_file = st.file_uploader("Subí el ZIP procesado", type=["zip"], key="zip_manual")
-        if zip_file:
-            zip_bytes = zip_file.read()
-            with open("procesadas.zip","wb") as f: f.write(zip_bytes)
-            with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
-                nombres = [n for n in zf.namelist() if n.upper().startswith("MLA")]
-            st.success(f"{len(nombres)} fotos procesadas encontradas")
-            if nombres:
-                cols = st.columns(min(5, len(nombres)))
-                with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
-                    for idx, nombre in enumerate(nombres[:5]):
-                        with cols[idx]:
-                            img = Image.open(io.BytesIO(zf.read(nombre)))
-                            st.image(img, caption=nombre.split("_resultado")[0], use_container_width=True)
-                if st.button("Continuar al Paso 4 →", type="primary", key="continuar_paso4_manual"):
-                    save_step(4)
-                    st.rerun()
+    st.divider()
+    if st.button("Continuar al Paso 4 →", type="primary"):
+        save_step(4)
+        st.rerun()
 
 # ══ PASO 4 ══
 elif step == 4:
