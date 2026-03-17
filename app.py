@@ -254,7 +254,7 @@ elif step == 2:
 
     st.info(f"Se van a descargar y procesar **{len(items)}** fotos directamente desde MercadoLibre. Esto puede tardar unos minutos.")
 
-    if st.button("🚀 Descargar y quitar fondo ahora", type="primary"):
+    if st.button("🧹 Borrar fondo ahora", type="primary"):
         bar = st.progress(0, text="Iniciando...")
         errores = []
         zip_out_buf = io.BytesIO()
@@ -506,8 +506,7 @@ elif step == 4:
                 for e in errores_detalle:
                     st.text(e)
 
-        if st.button("Volver al inicio"):
-
+        if st.button("↺ Volver al inicio"):
             for f in [
                 'items.json',
                 'step.json',
@@ -518,7 +517,6 @@ elif step == 4:
             ]:
                 if os.path.exists(f):
                     os.remove(f)
-
             st.session_state.clear()
             save_step(1)
             st.rerun()
