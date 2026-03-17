@@ -401,8 +401,6 @@ elif step == 3:
                             try:
                                 img_bytes = zf_in.read(nombre)
                                 resultado_bytes = aplicar_fondo_blanco(img_bytes)
-
-                                # Nombre de salida: MLA1234567890_resultado.jpg
                                 item_id = os.path.splitext(nombre)[0]
                                 nombre_out = f"{item_id}_resultado.jpg"
                                 zf_out.writestr(nombre_out, resultado_bytes)
@@ -419,13 +417,19 @@ elif step == 3:
                     procesadas_ok = len(nombres_orig) - len(errores_proc)
                     st.success(f"✅ {procesadas_ok} imágenes procesadas con fondo blanco")
 
-                    # Guardar el ZIP procesado y mostrar preview
                     zip_out_bytes = zip_out_buf.getvalue()
                     with open("procesadas.zip", "wb") as f:
                         f.write(zip_out_bytes)
+                    st.rerun()
+
+                # Botón continuar: siempre visible si procesadas.zip ya existe
+                if os.path.exists("procesadas.zip"):
+                    st.success("✅ ZIP procesado listo.")
+                    with open("procesadas.zip", "rb") as f:
+                        zip_descarga = f.read()
 
                     # Preview de las primeras 5 imágenes
-                    with zipfile.ZipFile(io.BytesIO(zip_out_bytes)) as zf_prev:
+                    with zipfile.ZipFile(io.BytesIO(zip_descarga)) as zf_prev:
                         nombres_prev = [n for n in zf_prev.namelist() if n.upper().startswith("MLA")]
                         if nombres_prev:
                             st.write("**Vista previa (primeras 5 fotos procesadas):**")
@@ -435,14 +439,12 @@ elif step == 3:
                                     img = Image.open(io.BytesIO(zf_prev.read(nombre)))
                                     st.image(img, caption=nombre.split("_resultado")[0], use_container_width=True)
 
-                    # Botón de descarga opcional + continuar
                     st.download_button(
                         label="💾 Descargar ZIP procesado (opcional)",
-                        data=zip_out_bytes,
+                        data=zip_descarga,
                         file_name="procesadas_fondo_blanco.zip",
                         mime="application/zip"
                     )
-
                     if st.button("Continuar al Paso 4 →", type="primary", key="continuar_paso4_auto"):
                         save_step(4)
                         st.rerun()
