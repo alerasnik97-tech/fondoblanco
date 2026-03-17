@@ -518,6 +518,9 @@ elif step == 4:
             ]:
                 if os.path.exists(f):
                     os.remove(f)
+            token_guardado = st.session_state.get("token")
             st.session_state.clear()
+            if token_guardado:
+                st.session_state.token = token_guardado
             save_step(1)
             st.rerun()
