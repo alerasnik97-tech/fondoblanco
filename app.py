@@ -507,20 +507,8 @@ elif step == 4:
                     st.text(e)
 
         st.divider()
+        st.divider()
         if st.button("↺ Volver al inicio", type="primary"):
-            for f in [
-                'items.json',
-                'step.json',
-                'listo_paso2.txt',
-                'portadas_descargadas.zip',
-                'procesadas.zip',
-                'img_urls.json'
-            ]:
-                if os.path.exists(f):
-                    os.remove(f)
-            token_guardado = st.session_state.get("token")
-            st.session_state.clear()
-            if token_guardado:
-                st.session_state.token = token_guardado
-            save_step(1)
+            for f in ["items.json","step.json","listo_paso2.txt","portadas_descargadas.zip","procesadas.zip","img_urls.json"]:
+                if os.path.exists(f): os.remove(f)
             st.rerun()
