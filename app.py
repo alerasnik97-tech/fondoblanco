@@ -1,82 +1,41 @@
 import streamlit as st
 import requests
-import os
-import json
-import pandas as pd
 import zipfile
 import io
 import time
 from PIL import Image
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# ── CONFIGURACIÓN DE SECRETOS ──
-try:
-    CLIENT_ID     = st.secrets["CLIENT_ID"]
-    CLIENT_SECRET = st.secrets["CLIENT_SECRET"]
-except KeyError:
-    st.error("Faltan las credenciales en los Secretos")
-    st.stop()
+st.set_page_config(page_title="Optimizador ML", layout="wide")
 
-REDIRECT_URI  = "https://httpbin.org/get"
-ML_SCOPES     = "offline_access read_listings write_listings"
-TOKEN_FILE    = "ml_token.json"
-ITEMS_FILE    = "items.json"
-STEP_FILE     = "step.json"
+st.title("📦 Optimización de imágenes para Mercado Libre")
 
-st.set_page_config(page_title="FondoBlanco", layout="wide")
+# =========================
+# 🔐 TOKEN (AJUSTÁ ESTO)
+# =========================
 
-# ── HELPERS ──
-def save_step(s):
-    with open(STEP_FILE,"w") as f: json.dump(s,f)
-
-def load_step():
-    if os.path.exists(STEP_FILE):
-        with open(STEP_FILE) as f: return json.load(f)
-    return 1
-
-def save_items(items):
-    with open(ITEMS_FILE,"w") as f: json.dump(items,f)
-
-def load_items():
-    if os.path.exists(ITEMS_FILE):
-        with open(ITEMS_FILE) as f: return json.load(f)
-    return []
-
-def guardar_token(d):
-    d["saved_at"] = time.time()
-    with open(TOKEN_FILE,"w") as f: json.dump(d,f)
-
-def renovar_token():
-    if not os.path.exists(TOKEN_FILE): return None
-    with open(TOKEN_FILE) as f: saved = json.load(f)
-    r = requests.post("https://api.mercadolibre.com/oauth/token", data={
-        "grant_type":"refresh_token",
-        "client_id":CLIENT_ID,
-        "client_secret":CLIENT_SECRET,
-        "refresh_token":saved["refresh_token"]
-    })
-    if r.status_code == 200:
-        d = r.json()
-        guardar_token(d)
-        return d["access_token"]
-    return None
+TOKEN = "TU_ACCESS_TOKEN"
 
 def get_token():
-    if os.path.exists(TOKEN_FILE):
-        with open(TOKEN_FILE) as f:
-            saved = json.load(f)
-            return saved.get("access_token")
-    return renovar_token()
+    return TOKEN
 
-# ── WORKER PARALELO ──
+def renovar_token():
+    pass  # opcional si usás refresh
+
+# =========================
+# 🧠 PROCESAMIENTO
+# =========================
+
 def procesar_imagen(nombre, zf, RETRIES, DELAY):
     item_id = nombre.split("_resultado")[0].split(".")[0]
 
     for intento in range(RETRIES):
         try:
-            token = get_token()
+            token_actual = get_token()
 
-            headers = {"Authorization": f"Bearer {token}"}
+            headers = {
+                "Authorization": f"Bearer {token_actual}"
+            }
 
             r = requests.get(
                 f"https://api.mercadolibre.com/items/{item_id}",
@@ -93,30 +52,35 @@ def procesar_imagen(nombre, zf, RETRIES, DELAY):
             img_data = zf.read(nombre)
             img = Image.open(io.BytesIO(img_data)).convert("RGB")
 
-            canvas = Image.new("RGB", (1200,1200), (255,255,255))
+            canvas_size = 1200
+            ocupacion = 0.88
+            target_max = int(canvas_size * ocupacion)
 
-            scale = 1050 / max(img.size)
-            img = img.resize(
-                (int(img.width*scale), int(img.height*scale)),
-                Image.Resampling.LANCZOS
-            )
+            ancho, alto = img.size
+            scale = target_max / max(ancho, alto)
 
-            x = (1200 - img.width)//2
-            y = (1200 - img.height)//2
-            canvas.paste(img, (x,y))
+            nuevo_ancho = int(ancho * scale)
+            nuevo_alto = int(alto * scale)
+
+            img = img.resize((nuevo_ancho, nuevo_alto), Image.Resampling.LANCZOS)
+
+            canvas = Image.new("RGB", (canvas_size, canvas_size), (255,255,255))
+            x = (canvas_size - nuevo_ancho) // 2
+            y = (canvas_size - nuevo_alto) // 2
+            canvas.paste(img, (x, y))
 
             buf = io.BytesIO()
             canvas.save(buf, format="JPEG", quality=98)
-            img_final = buf.getvalue()
+            final_img = buf.getvalue()
 
             upload = requests.post(
                 "https://api.mercadolibre.com/pictures/items/upload",
-                headers=headers,
-                files={"file": (nombre, img_final, "image/jpeg")}
+                headers={"Authorization": f"Bearer {token_actual}"},
+                files={"file": (nombre, final_img, "image/jpeg")}
             )
 
             if upload.status_code not in (200,201):
-                raise Exception("UPLOAD")
+                raise Exception(f"UPLOAD {upload.status_code}")
 
             nueva_id = upload.json()["id"]
 
@@ -127,7 +91,7 @@ def procesar_imagen(nombre, zf, RETRIES, DELAY):
             )
 
             if update.status_code not in (200,201):
-                raise Exception("UPDATE")
+                raise Exception(f"UPDATE {update.status_code}")
 
             time.sleep(DELAY)
             return ("ok", item_id)
@@ -137,92 +101,78 @@ def procesar_imagen(nombre, zf, RETRIES, DELAY):
                 return ("error", f"{item_id}: {str(e)}")
             time.sleep(1)
 
-# ── UI ──
-step = load_step()
-items = load_items()
+# =========================
+# 📤 SUBIDA ZIP
+# =========================
 
-st.title("⬜ Fondo Blanco ML")
+st.subheader("1️⃣ Subir ZIP de imágenes procesadas")
 
-# PASO 1
-if step == 1:
-    archivo = st.file_uploader("Subí Excel", type=["xlsx"])
-    if archivo:
-        df = pd.read_excel(archivo, header=None)
-        nuevos_items = df.iloc[4:,1].dropna().astype(str).tolist()
-        save_items(nuevos_items)
-        save_step(2)
-        st.rerun()
+archivo = st.file_uploader("Subí el ZIP", type=["zip"])
 
-# PASO 2 (simplificado)
-elif step == 2:
-    st.write(f"{len(items)} items cargados")
-    if st.button("Continuar"):
-        save_step(3)
-        st.rerun()
+nombres = []
 
-# PASO 3
-elif step == 3:
-    zip_file = st.file_uploader("Subí ZIP procesado", type=["zip"])
-    if zip_file:
-        with open("procesadas.zip","wb") as f:
-            f.write(zip_file.read())
-        save_step(4)
-        st.rerun()
+if archivo:
+    with zipfile.ZipFile(archivo) as z:
+        nombres = z.namelist()
+    st.success(f"{len(nombres)} imágenes cargadas")
 
-# PASO 4 (🔥 PRO)
-elif step == 4:
+# =========================
+# 🚀 EJECUCIÓN
+# =========================
 
-    with zipfile.ZipFile("procesadas.zip") as zf:
-        nombres = [n for n in zf.namelist() if n.startswith("MLA")]
+st.subheader("2️⃣ Subir a Mercado Libre")
 
-    st.write(f"{len(nombres)} imágenes")
+if st.button("Subir todas las fotos", type="primary") and archivo:
 
     DELAY = 0.6
     RETRIES = 3
     BATCH_SIZE = 80
     MAX_WORKERS = 3
 
-    if st.button("Subir todo"):
+    bar = st.progress(0)
+    ok = 0
+    errores = []
 
-        bar = st.progress(0)
-        ok = 0
-        errores = []
+    total = len(nombres)
 
-        total = len(nombres)
+    with zipfile.ZipFile(archivo) as zf:
 
-        with zipfile.ZipFile("procesadas.zip") as zf:
+        for i in range(0, total, BATCH_SIZE):
 
-            for i in range(0, total, BATCH_SIZE):
+            lote = nombres[i:i+BATCH_SIZE]
+            st.info(f"Lote {i} a {i+len(lote)}")
 
-                lote = nombres[i:i+BATCH_SIZE]
+            futures = []
 
-                futures = []
+            with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+                for nombre in lote:
+                    futures.append(
+                        executor.submit(procesar_imagen, nombre, zf, RETRIES, DELAY)
+                    )
 
-                with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+                completados = 0
 
-                    for nombre in lote:
-                        futures.append(executor.submit(
-                            procesar_imagen, nombre, zf, RETRIES, DELAY
-                        ))
+                for future in as_completed(futures):
+                    resultado, data = future.result()
 
-                    done = 0
+                    completados += 1
+                    progreso = (i + completados) / total
+                    bar.progress(progreso)
 
-                    for future in as_completed(futures):
-                        res, data = future.result()
-                        done += 1
+                    if resultado == "ok":
+                        ok += 1
+                    else:
+                        errores.append(data)
 
-                        bar.progress((i+done)/total)
+            st.info("Pausa...")
+            time.sleep(5)
 
-                        if res == "ok":
-                            ok += 1
-                        else:
-                            errores.append(data)
+    bar.progress(1.0)
 
-                time.sleep(5)
+    st.success(f"✅ {ok} OK")
 
-        st.success(f"OK: {ok}")
-
-        if errores:
-            st.warning(f"Errores: {len(errores)}")
+    if errores:
+        st.warning(f"⚠️ {len(errores)} errores")
+        with st.expander("Ver errores"):
             for e in errores:
                 st.text(e)
