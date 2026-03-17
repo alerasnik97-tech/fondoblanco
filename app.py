@@ -362,6 +362,81 @@ elif step == 4:
             st.rerun()
         st.stop()
 
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    def procesar_imagen(nombre, zf, token, RETRIES, DELAY):
+        item_id = nombre.split("_resultado")[0].split(".")[0]
+
+        for intento in range(RETRIES):
+            try:
+                headers = {"Authorization": f"Bearer {token}", "User-Agent": "Mozilla/5.0"}
+
+                r = requests.get(
+                    f"https://api.mercadolibre.com/items/{item_id}",
+                    headers=headers,
+                    timeout=10
+                )
+
+                if r.status_code != 200:
+                    raise Exception(f"GET {r.status_code}")
+
+                pictures = r.json().get("pictures", [])
+                fotos_restantes = [{"id": p["id"]} for p in pictures[1:]]
+
+                img_data = zf.read(nombre)
+                img = Image.open(io.BytesIO(img_data)).convert("RGB")
+
+                canvas_size = 1200
+                ocupacion = 0.88
+                target_max = int(canvas_size * ocupacion)
+
+                ancho, alto = img.size
+                scale = target_max / max(ancho, alto)
+
+                nuevo_ancho = int(ancho * scale)
+                nuevo_alto = int(alto * scale)
+
+                img = img.resize((nuevo_ancho, nuevo_alto), Image.Resampling.LANCZOS)
+
+                canvas = Image.new("RGB", (canvas_size, canvas_size), (255,255,255))
+                x = (canvas_size - nuevo_ancho) // 2
+                y = (canvas_size - nuevo_alto) // 2
+                canvas.paste(img, (x, y))
+
+                buf = io.BytesIO()
+                canvas.save(buf, format="JPEG", quality=98, subsampling=0, optimize=True)
+                img_data_final = buf.getvalue()
+
+                upload = requests.post(
+                    "https://api.mercadolibre.com/pictures/items/upload",
+                    headers={"Authorization": f"Bearer {token}"},
+                    files={"file": (nombre, img_data_final, "image/jpeg")},
+                    timeout=30
+                )
+
+                if upload.status_code not in (200,201):
+                    raise Exception(f"UPLOAD {upload.status_code}")
+
+                nueva_id = upload.json()["id"]
+
+                update = requests.put(
+                    f"https://api.mercadolibre.com/items/{item_id}",
+                    headers={**headers, "Content-Type":"application/json"},
+                    json={"pictures":[{"id":nueva_id}] + fotos_restantes},
+                    timeout=15
+                )
+
+                if update.status_code not in (200,201):
+                    raise Exception(f"UPDATE {update.status_code}")
+
+                time.sleep(DELAY)
+                return ("ok", item_id)
+
+            except Exception as e:
+                if intento == RETRIES - 1:
+                    return ("error", f"{item_id}: {str(e)}")
+                time.sleep(1)
+
     with zipfile.ZipFile("procesadas.zip") as zf:
         nombres = [n for n in zf.namelist() if n.upper().startswith("MLA")]
 
@@ -369,108 +444,50 @@ elif step == 4:
 
     if st.button("Subir todas las fotos a ML", type="primary"):
 
-        headers = {"Authorization": f"Bearer {token}", "User-Agent": "Mozilla/5.0"}
+        DELAY = 0.6
+        RETRIES = 3
+        BATCH_SIZE = 80
+        MAX_WORKERS = 3
+
         bar = st.progress(0, text="Iniciando...")
 
         ok = 0
         errores_detalle = []
 
+        total = len(nombres)
+
         with zipfile.ZipFile("procesadas.zip") as zf:
 
-            for i, nombre in enumerate(nombres):
+            for i in range(0, total, BATCH_SIZE):
 
-                item_id = nombre.split("_resultado")[0].split(".")[0]
+                lote = nombres[i:i+BATCH_SIZE]
+                st.info(f"Procesando lote {i} a {i+len(lote)}")
 
-                bar.progress((i+1)/len(nombres), text=f"Subiendo {i+1}/{len(nombres)}: {item_id}")
+                futures = []
 
-                try:
+                with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+                    for nombre in lote:
+                        futures.append(executor.submit(
+                            procesar_imagen, nombre, zf, token, RETRIES, DELAY
+                        ))
 
-                    # Obtener fotos actuales
-                    r = requests.get(
-                        f"https://api.mercadolibre.com/items/{item_id}",
-                        headers=headers,
-                        timeout=10
-                    )
+                    completados = 0
 
-                    if r.status_code != 200:
-                        errores_detalle.append(f"{item_id}: GET item → {r.status_code}")
-                        continue
+                    for future in as_completed(futures):
+                        resultado, data = future.result()
 
-                    pictures = r.json().get("pictures", [])
-                    fotos_restantes = [{"id": p["id"]} for p in pictures[1:]]
+                        completados += 1
+                        progreso_global = (i + completados) / total
 
-                    # Leer imagen
-                    img_data = zf.read(nombre)
-                    img = Image.open(io.BytesIO(img_data)).convert("RGB")
+                        bar.progress(progreso_global, text=f"{i+completados}/{total}")
 
-                    ancho, alto = img.size
+                        if resultado == "ok":
+                            ok += 1
+                        else:
+                            errores_detalle.append(data)
 
-                    canvas_size = 1200
-                    ocupacion = 0.88
-                    target_max = int(canvas_size * ocupacion)
-
-                    # calcular escala
-                    scale = target_max / max(ancho, alto)
-
-                    nuevo_ancho = int(ancho * scale)
-                    nuevo_alto = int(alto * scale)
-
-                    # redimensionar
-                    img = img.resize((nuevo_ancho, nuevo_alto), Image.Resampling.LANCZOS)
-
-                    # crear fondo blanco
-                    canvas = Image.new("RGB", (canvas_size, canvas_size), (255,255,255))
-
-                    # centrar imagen
-                    x = (canvas_size - nuevo_ancho) // 2
-                    y = (canvas_size - nuevo_alto) // 2
-
-                    canvas.paste(img, (x, y))
-
-                    buf = io.BytesIO()
-
-                    canvas.save(
-                        buf,
-                        format="JPEG",
-                        quality=98,
-                        subsampling=0,
-                        optimize=True
-                    )
-
-                    img_data_final = buf.getvalue()
-
-                    # subir imagen
-                    upload = requests.post(
-                        "https://api.mercadolibre.com/pictures/items/upload",
-                        headers={"Authorization": f"Bearer {token}"},
-                        files={"file": (nombre, img_data_final, "image/jpeg")},
-                        timeout=30
-                    )
-
-                    if upload.status_code not in (200,201):
-                        errores_detalle.append(f"{item_id}: upload → {upload.status_code}")
-                        continue
-
-                    nueva_id = upload.json()["id"]
-
-                    # actualizar publicación
-                    update = requests.put(
-                        f"https://api.mercadolibre.com/items/{item_id}",
-                        headers={**headers, "Content-Type":"application/json"},
-                        json={"pictures":[{"id":nueva_id}] + fotos_restantes},
-                        timeout=15
-                    )
-
-                    if update.status_code not in (200,201):
-                        errores_detalle.append(f"{item_id}: update → {update.status_code}")
-                        continue
-
-                    ok += 1
-
-                except Exception as e:
-                    errores_detalle.append(f"{item_id}: {str(e)}")
-
-                time.sleep(0.5)
+                st.info("⏸️ Pausa entre lotes...")
+                time.sleep(5)
 
         bar.progress(1.0, text="Completado")
 
