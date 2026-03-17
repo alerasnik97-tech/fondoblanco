@@ -506,17 +506,18 @@ elif step == 4:
                 for e in errores_detalle:
                     st.text(e)
 
-        if st.button("↺ Volver al inicio"):
-            for f in [
-                'items.json',
-                'step.json',
-                'listo_paso2.txt',
-                'portadas_descargadas.zip',
-                'procesadas.zip',
-                'img_urls.json'
-            ]:
-                if os.path.exists(f):
-                    os.remove(f)
-            st.session_state.clear()
-            save_step(1)
-            st.rerun()
+    st.divider()
+    if st.button("↺ Volver al inicio", type="primary"):
+        for f in [
+            'items.json',
+            'step.json',
+            'listo_paso2.txt',
+            'portadas_descargadas.zip',
+            'procesadas.zip',
+            'img_urls.json'
+        ]:
+            if os.path.exists(f):
+                os.remove(f)
+        st.session_state.clear()
+        save_step(1)
+        st.rerun()
