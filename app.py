@@ -367,110 +367,132 @@ elif step == 4:
 
     st.write(f"**{len(nombres)}** fotos listas para subir a MercadoLibre")
 
+    # ⚙️ CONFIG PRO
+    DELAY = 0.7
+    RETRIES = 3
+    BATCH_SIZE = 100
+
     if st.button("Subir todas las fotos a ML", type="primary"):
 
-        headers = {"Authorization": f"Bearer {token}", "User-Agent": "Mozilla/5.0"}
         bar = st.progress(0, text="Iniciando...")
-
         ok = 0
         errores_detalle = []
 
+        total = len(nombres)
+
         with zipfile.ZipFile("procesadas.zip") as zf:
 
-            for i, nombre in enumerate(nombres):
+            # 🔥 PROCESO POR LOTES
+            for i in range(0, total, BATCH_SIZE):
 
-                item_id = nombre.split("_resultado")[0].split(".")[0]
+                lote = nombres[i:i+BATCH_SIZE]
+                st.info(f"Procesando lote {i} a {i+len(lote)}")
 
-                bar.progress((i+1)/len(nombres), text=f"Subiendo {i+1}/{len(nombres)}: {item_id}")
+                for j, nombre in enumerate(lote):
 
-                try:
+                    item_id = nombre.split("_resultado")[0].split(".")[0]
 
-                    # Obtener fotos actuales
-                    r = requests.get(
-                        f"https://api.mercadolibre.com/items/{item_id}",
-                        headers=headers,
-                        timeout=10
-                    )
+                    progreso_global = (i + j + 1) / total
+                    bar.progress(progreso_global, text=f"{i+j+1}/{total}: {item_id}")
 
-                    if r.status_code != 200:
-                        errores_detalle.append(f"{item_id}: GET item → {r.status_code}")
-                        continue
+                    # 🔁 RETRY LOOP
+                    for intento in range(RETRIES):
 
-                    pictures = r.json().get("pictures", [])
-                    fotos_restantes = [{"id": p["id"]} for p in pictures[1:]]
+                        try:
+                            token_actual = get_token()
 
-                    # Leer imagen
-                    img_data = zf.read(nombre)
-                    img = Image.open(io.BytesIO(img_data)).convert("RGB")
+                            headers = {
+                                "Authorization": f"Bearer {token_actual}",
+                                "User-Agent": "Mozilla/5.0"
+                            }
 
-                    ancho, alto = img.size
+                            # 1. Obtener item
+                            r = requests.get(
+                                f"https://api.mercadolibre.com/items/{item_id}",
+                                headers=headers,
+                                timeout=10
+                            )
 
-                    canvas_size = 1200
-                    ocupacion = 0.88
-                    target_max = int(canvas_size * ocupacion)
+                            if r.status_code == 401:
+                                renovar_token()
+                                continue
 
-                    # calcular escala
-                    scale = target_max / max(ancho, alto)
+                            if r.status_code != 200:
+                                raise Exception(f"GET {r.status_code}")
 
-                    nuevo_ancho = int(ancho * scale)
-                    nuevo_alto = int(alto * scale)
+                            pictures = r.json().get("pictures", [])
+                            fotos_restantes = [{"id": p["id"]} for p in pictures[1:]]
 
-                    # redimensionar
-                    img = img.resize((nuevo_ancho, nuevo_alto), Image.Resampling.LANCZOS)
+                            # 2. Procesar imagen
+                            img_data = zf.read(nombre)
+                            img = Image.open(io.BytesIO(img_data)).convert("RGB")
 
-                    # crear fondo blanco
-                    canvas = Image.new("RGB", (canvas_size, canvas_size), (255,255,255))
+                            ancho, alto = img.size
+                            canvas_size = 1200
+                            ocupacion = 0.88
+                            target_max = int(canvas_size * ocupacion)
 
-                    # centrar imagen
-                    x = (canvas_size - nuevo_ancho) // 2
-                    y = (canvas_size - nuevo_alto) // 2
+                            scale = target_max / max(ancho, alto)
+                            nuevo_ancho = int(ancho * scale)
+                            nuevo_alto = int(alto * scale)
 
-                    canvas.paste(img, (x, y))
+                            img = img.resize((nuevo_ancho, nuevo_alto), Image.Resampling.LANCZOS)
 
-                    buf = io.BytesIO()
+                            canvas = Image.new("RGB", (canvas_size, canvas_size), (255,255,255))
+                            x = (canvas_size - nuevo_ancho) // 2
+                            y = (canvas_size - nuevo_alto) // 2
+                            canvas.paste(img, (x, y))
 
-                    canvas.save(
-                        buf,
-                        format="JPEG",
-                        quality=98,
-                        subsampling=0,
-                        optimize=True
-                    )
+                            buf = io.BytesIO()
+                            canvas.save(buf, format="JPEG", quality=98, subsampling=0, optimize=True)
+                            img_data_final = buf.getvalue()
 
-                    img_data_final = buf.getvalue()
+                            # 3. Subir imagen
+                            upload = requests.post(
+                                "https://api.mercadolibre.com/pictures/items/upload",
+                                headers={"Authorization": f"Bearer {token_actual}"},
+                                files={"file": (nombre, img_data_final, "image/jpeg")},
+                                timeout=30
+                            )
 
-                    # subir imagen
-                    upload = requests.post(
-                        "https://api.mercadolibre.com/pictures/items/upload",
-                        headers={"Authorization": f"Bearer {token}"},
-                        files={"file": (nombre, img_data_final, "image/jpeg")},
-                        timeout=30
-                    )
+                            if upload.status_code == 401:
+                                renovar_token()
+                                continue
 
-                    if upload.status_code not in (200,201):
-                        errores_detalle.append(f"{item_id}: upload → {upload.status_code}")
-                        continue
+                            if upload.status_code not in (200,201):
+                                raise Exception(f"UPLOAD {upload.status_code}")
 
-                    nueva_id = upload.json()["id"]
+                            nueva_id = upload.json()["id"]
 
-                    # actualizar publicación
-                    update = requests.put(
-                        f"https://api.mercadolibre.com/items/{item_id}",
-                        headers={**headers, "Content-Type":"application/json"},
-                        json={"pictures":[{"id":nueva_id}] + fotos_restantes},
-                        timeout=15
-                    )
+                            # 4. Actualizar item
+                            update = requests.put(
+                                f"https://api.mercadolibre.com/items/{item_id}",
+                                headers={**headers, "Content-Type":"application/json"},
+                                json={"pictures":[{"id":nueva_id}] + fotos_restantes},
+                                timeout=15
+                            )
 
-                    if update.status_code not in (200,201):
-                        errores_detalle.append(f"{item_id}: update → {update.status_code}")
-                        continue
+                            if update.status_code == 401:
+                                renovar_token()
+                                continue
 
-                    ok += 1
+                            if update.status_code not in (200,201):
+                                raise Exception(f"UPDATE {update.status_code}")
 
-                except Exception as e:
-                    errores_detalle.append(f"{item_id}: {str(e)}")
+                            ok += 1
+                            break  # ✅ éxito → sale del retry
 
-                time.sleep(0.5)
+                        except Exception as e:
+                            if intento == RETRIES - 1:
+                                errores_detalle.append(f"{item_id}: {str(e)}")
+
+                            time.sleep(1)
+
+                    time.sleep(DELAY)
+
+                # ⏸️ Pausa entre lotes (CLAVE)
+                st.info("⏸️ Pausa entre lotes...")
+                time.sleep(5)
 
         bar.progress(1.0, text="Completado")
 
