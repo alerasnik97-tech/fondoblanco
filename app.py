@@ -7,6 +7,11 @@ import zipfile
 import io
 import time
 from PIL import Image
+try:
+    from rembg import remove as rembg_remove
+    REMBG_DISPONIBLE = True
+except ImportError:
+    REMBG_DISPONIBLE = False
 
 # ── CONFIGURACIÓN DE SECRETOS ──
 try:
@@ -96,6 +101,38 @@ def get_token():
         st.session_state.token = t
     return t
 
+# ── función fondo blanco ──
+def aplicar_fondo_blanco(img_bytes: bytes, canvas_size: int = 1200, ocupacion: float = 0.88) -> bytes:
+    """
+    Remueve el fondo de una imagen y coloca fondo blanco.
+    Retorna los bytes JPEG del resultado.
+    Requiere: pip install rembg onnxruntime pillow
+    """
+    # 1. Remover fondo → imagen RGBA
+    resultado_rgba = rembg_remove(img_bytes)
+    img = Image.open(io.BytesIO(resultado_rgba)).convert("RGBA")
+
+    # 2. Pegar sobre canvas blanco
+    fondo = Image.new("RGBA", img.size, (255, 255, 255, 255))
+    fondo.paste(img, mask=img.split()[3])   # usa el canal alpha como máscara
+    img_rgb = fondo.convert("RGB")
+
+    # 3. Centrar en canvas cuadrado con margen
+    target_max = int(canvas_size * ocupacion)
+    ancho, alto = img_rgb.size
+    scale = target_max / max(ancho, alto)
+    img_rgb = img_rgb.resize((int(ancho * scale), int(alto * scale)), Image.Resampling.LANCZOS)
+
+    canvas = Image.new("RGB", (canvas_size, canvas_size), (255, 255, 255))
+    x = (canvas_size - img_rgb.width) // 2
+    y = (canvas_size - img_rgb.height) // 2
+    canvas.paste(img_rgb, (x, y))
+
+    # 4. Serializar a JPEG
+    buf = io.BytesIO()
+    canvas.save(buf, format="JPEG", quality=95, subsampling=0, optimize=True)
+    return buf.getvalue()
+
 # ── estado desde disco ──
 step = load_step()
 items = load_items()
@@ -144,7 +181,7 @@ st.divider()
 for n, title, desc in [
     (1,"Importar publicaciones","Subí tu planilla Excel"),
     (2,"Descargar fotos de portada","Se obtienen las fotos actuales"),
-    (3,"Procesar fondo blanco","Descargá el ZIP y procesalo"),
+    (3,"Procesar fondo blanco","Procesado automático o subí tu ZIP"),
     (4,"Subir fotos actualizadas","Se reemplaza la portada en ML"),
 ]:
     cls = "step-done" if step > n else ("step-active" if step == n else "")
@@ -328,28 +365,108 @@ async function go() {{
 
 # ══ PASO 3 ══
 elif step == 3:
-    st.subheader("Paso 3 — Subir fotos con fondo blanco")
+    st.subheader("Paso 3 — Procesar fondo blanco")
     if st.button("← Volver al Paso 2 (descargar fotos de nuevo)"):
         save_step(2)
         st.rerun()
-    st.info("Subí el ZIP procesado por Claude. Los archivos deben llamarse: MLA1234567890_resultado.jpg")
-    zip_file = st.file_uploader("Subí el ZIP procesado", type=["zip"])
-    if zip_file:
-        zip_bytes = zip_file.read()
-        with open("procesadas.zip","wb") as f: f.write(zip_bytes)
-        with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
-            nombres = [n for n in zf.namelist() if n.upper().startswith("MLA")]
-        st.success(f"{len(nombres)} fotos procesadas encontradas")
-        if nombres:
-            cols = st.columns(min(5, len(nombres)))
+
+    tab_auto, tab_manual = st.tabs(["🤖 Procesar automáticamente", "📁 Subir ZIP ya procesado"])
+
+    # ── Tab 1: procesamiento automático con rembg ──
+    with tab_auto:
+        if not REMBG_DISPONIBLE:
+            st.error("❌ La librería `rembg` no está instalada.")
+            st.code("pip install rembg onnxruntime", language="bash")
+            st.info("Instalá la librería y reiniciá la app para usar esta función.")
+        else:
+            st.info("Subí el ZIP de portadas descargado en el Paso 2. La app removerá el fondo y colocará fondo blanco automáticamente.")
+            zip_orig = st.file_uploader("Subí el ZIP de portadas originales (portadas_ml.zip)", type=["zip"], key="zip_orig")
+            if zip_orig:
+                zip_orig_bytes = zip_orig.read()
+                with zipfile.ZipFile(io.BytesIO(zip_orig_bytes)) as zf:
+                    nombres_orig = [n for n in zf.namelist() if n.lower().endswith((".jpg", ".jpeg", ".png"))]
+
+                st.write(f"**{len(nombres_orig)}** imágenes encontradas en el ZIP")
+
+                if st.button("🚀 Procesar fondo blanco ahora", type="primary", key="btn_procesar"):
+                    bar = st.progress(0, text="Iniciando procesamiento...")
+                    errores_proc = []
+                    zip_out_buf = io.BytesIO()
+
+                    with zipfile.ZipFile(io.BytesIO(zip_orig_bytes)) as zf_in, \
+                         zipfile.ZipFile(zip_out_buf, "w", zipfile.ZIP_DEFLATED) as zf_out:
+
+                        for i, nombre in enumerate(nombres_orig):
+                            bar.progress((i + 1) / len(nombres_orig), text=f"Procesando {i+1}/{len(nombres_orig)}: {nombre}")
+                            try:
+                                img_bytes = zf_in.read(nombre)
+                                resultado_bytes = aplicar_fondo_blanco(img_bytes)
+
+                                # Nombre de salida: MLA1234567890_resultado.jpg
+                                item_id = os.path.splitext(nombre)[0]
+                                nombre_out = f"{item_id}_resultado.jpg"
+                                zf_out.writestr(nombre_out, resultado_bytes)
+                            except Exception as e:
+                                errores_proc.append(f"{nombre}: {str(e)}")
+
+                    bar.progress(1.0, text="✅ Procesamiento completado")
+
+                    if errores_proc:
+                        with st.expander(f"⚠️ {len(errores_proc)} errores"):
+                            for e in errores_proc:
+                                st.text(e)
+
+                    procesadas_ok = len(nombres_orig) - len(errores_proc)
+                    st.success(f"✅ {procesadas_ok} imágenes procesadas con fondo blanco")
+
+                    # Guardar el ZIP procesado y mostrar preview
+                    zip_out_bytes = zip_out_buf.getvalue()
+                    with open("procesadas.zip", "wb") as f:
+                        f.write(zip_out_bytes)
+
+                    # Preview de las primeras 5 imágenes
+                    with zipfile.ZipFile(io.BytesIO(zip_out_bytes)) as zf_prev:
+                        nombres_prev = [n for n in zf_prev.namelist() if n.upper().startswith("MLA")]
+                        if nombres_prev:
+                            st.write("**Vista previa (primeras 5 fotos procesadas):**")
+                            cols = st.columns(min(5, len(nombres_prev)))
+                            for idx, nombre in enumerate(nombres_prev[:5]):
+                                with cols[idx]:
+                                    img = Image.open(io.BytesIO(zf_prev.read(nombre)))
+                                    st.image(img, caption=nombre.split("_resultado")[0], use_container_width=True)
+
+                    # Botón de descarga opcional + continuar
+                    st.download_button(
+                        label="💾 Descargar ZIP procesado (opcional)",
+                        data=zip_out_bytes,
+                        file_name="procesadas_fondo_blanco.zip",
+                        mime="application/zip"
+                    )
+
+                    if st.button("Continuar al Paso 4 →", type="primary", key="continuar_paso4_auto"):
+                        save_step(4)
+                        st.rerun()
+
+    # ── Tab 2: subir ZIP ya procesado (comportamiento original) ──
+    with tab_manual:
+        st.info("Si ya procesaste las fotos externamente, subí el ZIP aquí. Los archivos deben llamarse: `MLA1234567890_resultado.jpg`")
+        zip_file = st.file_uploader("Subí el ZIP procesado", type=["zip"], key="zip_manual")
+        if zip_file:
+            zip_bytes = zip_file.read()
+            with open("procesadas.zip","wb") as f: f.write(zip_bytes)
             with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
-                for idx, nombre in enumerate(nombres[:5]):
-                    with cols[idx]:
-                        img = Image.open(io.BytesIO(zf.read(nombre)))
-                        st.image(img, caption=nombre.split("_resultado")[0], use_container_width=True)
-            if st.button("Continuar al Paso 4 →", type="primary"):
-                save_step(4)
-                st.rerun()
+                nombres = [n for n in zf.namelist() if n.upper().startswith("MLA")]
+            st.success(f"{len(nombres)} fotos procesadas encontradas")
+            if nombres:
+                cols = st.columns(min(5, len(nombres)))
+                with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+                    for idx, nombre in enumerate(nombres[:5]):
+                        with cols[idx]:
+                            img = Image.open(io.BytesIO(zf.read(nombre)))
+                            st.image(img, caption=nombre.split("_resultado")[0], use_container_width=True)
+                if st.button("Continuar al Paso 4 →", type="primary", key="continuar_paso4_manual"):
+                    save_step(4)
+                    st.rerun()
 
 # ══ PASO 4 ══
 elif step == 4:
